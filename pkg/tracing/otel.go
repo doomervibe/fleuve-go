@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fleuve/fleuve-go/pkg/config"
+	"github.com/doomervibe/fleuve-go/pkg/config"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"

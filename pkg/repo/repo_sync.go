@@ -9,8 +9,8 @@ import (
 
 	"github.com/lib/pq"
 
-	"github.com/fleuve/fleuve-go/pkg/delay"
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/delay"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 func isUniqueViolation(err error) bool {

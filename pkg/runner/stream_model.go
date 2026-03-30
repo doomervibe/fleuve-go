@@ -1,8 +1,8 @@
 package runner
 
 import (
-	"github.com/fleuve/fleuve-go/pkg/model"
-	"github.com/fleuve/fleuve-go/pkg/stream"
+	"github.com/doomervibe/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/stream"
 )
 
 // StreamToModelConsumedEvent maps a stream event to the model shape used by adapters and actions.

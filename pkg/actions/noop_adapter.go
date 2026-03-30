@@ -3,7 +3,7 @@ package actions
 import (
 	"context"
 
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 type noopAdapter struct{}

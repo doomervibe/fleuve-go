@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 type yieldRepo struct {

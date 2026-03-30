@@ -5,7 +5,7 @@ package integration_test
 import (
 	"testing"
 
-	"github.com/fleuve/fleuve-go/pkg/config"
+	"github.com/doomervibe/fleuve-go/pkg/config"
 )
 
 // Config still resolves when no fleuve.toml is present (CI / compose set FLEUVE_*).

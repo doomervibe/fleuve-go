@@ -96,7 +96,7 @@ Command → Gateway → Repo → PostgreSQL (Events)
 
 ```bash
 # Clone or add to go.mod
-go get github.com/fleuve/fleuve-go
+go get github.com/doomervibe/fleuve-go
 
 # Build binaries
 cd fleuve-go
@@ -125,7 +125,7 @@ import (
     "encoding/json"
     "log"
     
-    "github.com/fleuve/fleuve-go/pkg/model"
+    "github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 // Define your state
@@ -238,8 +238,8 @@ import (
     "context"
     "log"
     
-    "github.com/fleuve/fleuve-go/pkg/config"
-    "github.com/fleuve/fleuve-go/pkg/repo"
+    "github.com/doomervibe/fleuve-go/pkg/config"
+    "github.com/doomervibe/fleuve-go/pkg/repo"
 )
 
 func main() {
@@ -293,9 +293,9 @@ import (
     "os/signal"
     "syscall"
     
-    "github.com/fleuve/fleuve-go/pkg/config"
-    "github.com/fleuve/fleuve-go/pkg/gateway"
-    "github.com/fleuve/fleuve-go/pkg/repo"
+    "github.com/doomervibe/fleuve-go/pkg/config"
+    "github.com/doomervibe/fleuve-go/pkg/gateway"
+    "github.com/doomervibe/fleuve-go/pkg/repo"
 )
 
 func main() {
@@ -471,7 +471,7 @@ import (
     "encoding/json"
     "time"
     
-    "github.com/fleuve/fleuve-go/pkg/model"
+    "github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 // ============ State ============
@@ -1041,7 +1041,7 @@ http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 ### Metrics
 
 ```go
-import "github.com/fleuve/fleuve-go/pkg/metrics"
+import "github.com/doomervibe/fleuve-go/pkg/metrics"
 
 m := metrics.NewFleuveMetrics()
 

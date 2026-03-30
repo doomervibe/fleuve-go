@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 func TestInProcessEphemeralStoragePutGetRemove(t *testing.T) {

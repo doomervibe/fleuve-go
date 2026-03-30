@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/fleuve/fleuve-go/pkg/actions"
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/actions"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 type CommandParser func(cmdType string, payload map[string]any) (model.Command, error)

@@ -9,8 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/fleuve/fleuve-go/pkg/delay"
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/delay"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 func isPGXUniqueViolation(err error) bool {

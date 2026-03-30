@@ -4,7 +4,7 @@ package counterworkflow
 import (
 	"encoding/json"
 
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 // CounterState holds the workflow state.

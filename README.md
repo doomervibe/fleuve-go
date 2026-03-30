@@ -17,7 +17,7 @@ Fleuve is a **type-safe, event-sourced workflow framework** with:
 ## Installation
 
 ```bash
-go get github.com/fleuve/fleuve-go
+go get github.com/doomervibe/fleuve-go
 ```
 
 ## Quick Start
@@ -28,7 +28,7 @@ go get github.com/fleuve/fleuve-go
 package main
 
 import (
-    "github.com/fleuve/fleuve-go/pkg/model"
+    "github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 // Define your state
@@ -102,10 +102,10 @@ import (
     "database/sql"
     "log"
     
-    "github.com/fleuve/fleuve-go/pkg/config"
-    "github.com/fleuve/fleuve-go/pkg/repo"
-    "github.com/fleuve/fleuve-go/pkg/runner"
-    "github.com/fleuve/fleuve-go/pkg/stream"
+    "github.com/doomervibe/fleuve-go/pkg/config"
+    "github.com/doomervibe/fleuve-go/pkg/repo"
+    "github.com/doomervibe/fleuve-go/pkg/runner"
+    "github.com/doomervibe/fleuve-go/pkg/stream"
 )
 
 func main() {

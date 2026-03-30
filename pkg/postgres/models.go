@@ -3,7 +3,7 @@ package postgres
 import (
 	"time"
 
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 type StoredEvent struct {

@@ -3,8 +3,8 @@ package runner
 import (
 	"context"
 
-	"github.com/fleuve/fleuve-go/pkg/actions"
-	"github.com/fleuve/fleuve-go/pkg/stream"
+	"github.com/doomervibe/fleuve-go/pkg/actions"
+	"github.com/doomervibe/fleuve-go/pkg/stream"
 )
 
 // ActionExecutorSideEffects runs activities via an ActionExecutor when the adapter opts in.

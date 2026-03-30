@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/fleuve/fleuve-go/pkg/actions"
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/actions"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 type stubRepo struct {

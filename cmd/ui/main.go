@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fleuve/fleuve-go/pkg/config"
-	"github.com/fleuve/fleuve-go/pkg/repo"
-	"github.com/fleuve/fleuve-go/pkg/uibackend"
+	"github.com/doomervibe/fleuve-go/pkg/config"
+	"github.com/doomervibe/fleuve-go/pkg/repo"
+	"github.com/doomervibe/fleuve-go/pkg/uibackend"
 )
 
 func main() {

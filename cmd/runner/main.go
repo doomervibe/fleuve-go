@@ -13,13 +13,13 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/fleuve/fleuve-go/pkg/actions"
-	"github.com/fleuve/fleuve-go/pkg/config"
-	"github.com/fleuve/fleuve-go/pkg/fleuvecmd"
-	"github.com/fleuve/fleuve-go/pkg/repo"
-	"github.com/fleuve/fleuve-go/pkg/runner"
-	"github.com/fleuve/fleuve-go/pkg/stream"
-	"github.com/fleuve/fleuve-go/pkg/tracing"
+	"github.com/doomervibe/fleuve-go/pkg/actions"
+	"github.com/doomervibe/fleuve-go/pkg/config"
+	"github.com/doomervibe/fleuve-go/pkg/fleuvecmd"
+	"github.com/doomervibe/fleuve-go/pkg/repo"
+	"github.com/doomervibe/fleuve-go/pkg/runner"
+	"github.com/doomervibe/fleuve-go/pkg/stream"
+	"github.com/doomervibe/fleuve-go/pkg/tracing"
 )
 
 func main() {

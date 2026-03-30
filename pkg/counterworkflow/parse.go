@@ -3,7 +3,7 @@ package counterworkflow
 import (
 	"fmt"
 
-	"github.com/fleuve/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
 // ParseGatewayCommand maps JSON command_type + payload to a model.Command (HTTP gateway).

@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/fleuve/fleuve-go/pkg/model"
-	"github.com/fleuve/fleuve-go/pkg/postgres"
+	"github.com/doomervibe/fleuve-go/pkg/model"
+	"github.com/doomervibe/fleuve-go/pkg/postgres"
 )
 
 type ActionStatus string
