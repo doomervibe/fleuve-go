@@ -1,0 +1,104 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 16
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost*"
+            - "https://localhost*"
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  resource:
+    attributes:
+      - key: service.name
+        from_attribute: service.name
+        action: insert
+      - key: deployment.environment
+        value: development
+        action: insert
+
+  probabilistic_sampler:
+    hash_seed: 22
+    sampling_percentage: 100  # Set to lower value in production (e.g., 10)
+
+exporters:
+  # Debug exporter for development
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # Jaeger exporter (if Jaeger is available)
+  # jaeger:
+  #   endpoint: jaeger:14250
+  #   tls:
+  #     insecure: true
+
+  # OTLP exporter for downstream collectors or backends
+  # otlp:
+  #   endpoint: tempo:4317
+  #   tls:
+  #     insecure: true
+
+  # Prometheus exporter for metrics
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: otel_collector
+
+  # File exporter for debugging
+  file:
+    path: /tmp/traces.json
+    rotation:
+      max_megabytes: 10
+      max_days: 3
+      max_backups: 3
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: "/health"
+
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+service:
+  extensions: [health_check, zpages, pprof]
+
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [debug, file]
+
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [debug, prometheus]
+
+  telemetry:
+    logs:
+      level: info
+      development: true
+      encoding: console
+      output_paths: ["stdout"]
+      error_output_paths: ["stderr"]
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888

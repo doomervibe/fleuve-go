@@ -1,0 +1,82 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'fleuve-monitor'
+    environment: 'development'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+      # - alertmanager:9093
+
+rule_files:
+  # - "alerts.yml"
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # Fleuve Gateway metrics
+  - job_name: 'fleuve-gateway'
+    static_configs:
+      - targets: ['fleuve-gateway:8080']
+        labels:
+          service: 'gateway'
+          component: 'api'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Fleuve Runner metrics
+  - job_name: 'fleuve-runner'
+    static_configs:
+      - targets: ['fleuve-runner:9090']
+        labels:
+          service: 'runner'
+          component: 'workflow-engine'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+
+  # Fleuve UI metrics
+  - job_name: 'fleuve-ui'
+    static_configs:
+      - targets: ['fleuve-ui:3000']
+        labels:
+          service: 'ui'
+          component: 'frontend'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # PostgreSQL metrics (if using postgres_exporter)
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['postgres-exporter:9187']
+        labels:
+          service: 'postgres'
+          component: 'database'
+    scrape_interval: 30s
+
+  # NATS metrics
+  - job_name: 'nats'
+    static_configs:
+      - targets: ['nats:8222']
+        labels:
+          service: 'nats'
+          component: 'messaging'
+    metrics_path: '/metrics'
+    scrape_interval: 15s
+
+  # OpenTelemetry Collector metrics (if enabled)
+  - job_name: 'otel-collector'
+    static_configs:
+      - targets: ['otel-collector:8888']
+        labels:
+          service: 'otel-collector'
+          component: 'observability'
+    scrape_interval: 15s

@@ -1,0 +1,89 @@
+services:
+  postgres-test:
+    image: postgres:15
+    container_name: fleuve-postgres-test
+    environment:
+      POSTGRES_DB: fleuve_test
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d fleuve_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - fleuve-test-network
+
+  nats-test:
+    image: nats:2.10-alpine
+    container_name: fleuve-nats-test
+    command:
+      - "--jetstream"
+      - "--store_dir"
+      - "/tmp/nats-data"
+      - "-m"
+      - "8222"
+    ports:
+      - "4223:4222"
+      - "8223:8222"
+    tmpfs:
+      - /tmp/nats-data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/varz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - fleuve-test-network
+
+  test-runner:
+    image: golang:1.25-bookworm
+    container_name: fleuve-test-runner
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      nats-test:
+        condition: service_healthy
+    environment:
+      FLEUVE_DATABASE_URL: postgresql://test:test@postgres-test:5432/fleuve_test?sslmode=disable
+      FLEUVE_NATS_URL: nats://nats-test:4222
+      FLEUVE_MAX_INFLIGHT: "50"
+      FLEUVE_BATCH_SIZE: "5"
+      FLEUVE_OTEL_ENABLED: "false"
+      FLEUVE_ENVIRONMENT: test
+      GOTOOLCHAIN: auto
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        sleep 2
+        ARCH=$$(uname -m)
+        case $$ARCH in
+          x86_64) MARCH=amd64 ;;
+          aarch64) MARCH=arm64 ;;
+          *) echo "unsupported arch: $$ARCH"; exit 1 ;;
+        esac
+        cd /tmp
+        curl -fsSL "https://github.com/golang-migrate/migrate/releases/download/v4.18.1/migrate.linux-$${MARCH}.tar.gz" | tar xz
+        mv migrate /usr/local/bin/
+        cd /app
+        migrate -path migrations -database "$$FLEUVE_DATABASE_URL" up
+        go test -v -race -tags=realdeps -coverprofile=/tmp/coverage.out -covermode=atomic ./...
+    volumes:
+      - .:/app:ro
+      - go-modules:/go/pkg/mod
+    working_dir: /app
+    networks:
+      - fleuve-test-network
+
+volumes:
+  go-modules:
+
+networks:
+  fleuve-test-network:
+    driver: bridge

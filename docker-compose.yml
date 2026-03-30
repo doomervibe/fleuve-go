@@ -1,0 +1,164 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: fleuve-postgres
+    environment:
+      POSTGRES_DB: fleuve
+      POSTGRES_USER: fleuve
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleuve -d fleuve"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleuve-network
+
+  nats:
+    image: nats:2.10-alpine
+    container_name: fleuve-nats
+    command:
+      - "--jetstream"
+      - "--store_dir"
+      - "/data"
+      - "-m"
+      - "8222"
+      - "-sd"
+      - "/data"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+    volumes:
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/varz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fleuve-network
+
+  fleuve-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fleuve-runner
+    command: ["./fleuve-runner", "-type", "CounterWorkflow"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    environment:
+      FLEUVE_DATABASE_URL: postgresql://fleuve:secret@postgres:5432/fleuve?sslmode=disable
+      FLEUVE_NATS_URL: nats://nats:4222
+      FLEUVE_MAX_INFLIGHT: "100"
+      FLEUVE_BATCH_SIZE: "10"
+      FLEUVE_OTEL_ENABLED: "true"
+      FLEUVE_OTEL_ENDPOINT: otel-collector:4317
+      FLEUVE_OTEL_SERVICE_NAME: fleuve-runner
+      FLEUVE_METRICS_ADDR: ":9090"
+    ports:
+      - "9090:9090"
+    networks:
+      - fleuve-network
+    restart: unless-stopped
+
+  fleuve-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fleuve-gateway
+    command: ["./fleuve-gateway", "-addr", ":8080"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLEUVE_DATABASE_URL: postgresql://fleuve:secret@postgres:5432/fleuve?sslmode=disable
+      FLEUVE_OTEL_ENABLED: "true"
+      FLEUVE_OTEL_ENDPOINT: otel-collector:4317
+      FLEUVE_OTEL_SERVICE_NAME: fleuve-gateway
+    ports:
+      - "8080:8080"
+    networks:
+      - fleuve-network
+    restart: unless-stopped
+
+  fleuve-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fleuve-ui
+    command: ["./fleuve-ui", "-addr", ":3000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLEUVE_DATABASE_URL: postgresql://fleuve:secret@postgres:5432/fleuve?sslmode=disable
+      FLEUVE_OTEL_ENABLED: "true"
+      FLEUVE_OTEL_ENDPOINT: otel-collector:4317
+      FLEUVE_OTEL_SERVICE_NAME: fleuve-ui
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../fleuve/ui/frontend_dist:/app/frontend_dist:ro
+    networks:
+      - fleuve-network
+    restart: unless-stopped
+
+  # Optional: OpenTelemetry Collector for production tracing
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.114.0
+    container_name: fleuve-otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "13133:13133" # Health check
+    networks:
+      - fleuve-network
+    profiles:
+      - tracing
+    restart: unless-stopped
+
+  # Optional: Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: fleuve-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - fleuve-network
+    profiles:
+      - monitoring
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    driver: local
+  nats_data:
+    driver: local
+  prometheus_data:
+    driver: local
+
+networks:
+  fleuve-network:
+    driver: bridge
