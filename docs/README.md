@@ -997,7 +997,7 @@ services:
 
   fleuve-ui:
     build: .
-    command: ./fleuve-ui -addr :3000 -frontend /app/frontend_dist
+    command: ./fleuve-ui -addr :3000
     environment:
       FLEUVE_DATABASE_URL: postgresql://fleuve:secret@postgres:5432/fleuve
       FLEUVE_UI_TITLE: "Order Management"
@@ -1005,8 +1005,6 @@ services:
       - "3000:3000"
     depends_on:
       - postgres
-    volumes:
-      - ../fleuve/ui/frontend_dist:/app/frontend_dist:ro
 
 volumes:
   postgres_data:

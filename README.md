@@ -155,11 +155,28 @@ go build -o fleuve-gateway ./cmd/gateway
 
 ### 4. Start the Admin UI
 
+A **bundled** dashboard ships in the binary (`pkg/uiembed`): run the UI server and open [http://localhost:3000](http://localhost:3000).
+
 ```bash
-# Build the frontend (or use Python's build)
-# Then serve:
-go build -o fleuve-ui ./cmd/ui
-./fleuve-ui -addr :3000 -frontend /path/to/frontend_dist
+export FLEUVE_DATABASE_URL="postgresql://user:pass@localhost:5432/fleuve?sslmode=disable"
+go run ./cmd/ui -addr :3000
+```
+
+Optional:
+
+- **Override embedded UI**: `./fleuve-ui -frontend /other/frontend_dist` or `FLEUVE_FRONTEND_DIST` (e.g. a newer local build while developing the React app).
+- **API only** (JSON at `/`, CORS enabled): `./fleuve-ui -api-only`.
+
+#### Vendored UI (`pkg/uiembed/dist`)
+
+The **same Vite `frontend_dist`** as the Python Fleuve UI is **committed under `pkg/uiembed/dist/`** and embedded with `go:embed`, so `fleuve-ui` matches the Python web console without Node at runtime.
+
+To **refresh** after you rebuild the React app:
+
+```bash
+./scripts/vendor-fleuve-ui.sh /path/to/fleuve/ui/frontend_dist
+# or: FLEUVE_PYTHON_UI_DIST=/path/to/frontend_dist ./scripts/vendor-fleuve-ui.sh
+go build ./cmd/ui
 ```
 
 ## Configuration
@@ -227,7 +244,8 @@ pkg/
 ├── testing/      # Testing harness
 ├── tracing/      # OpenTelemetry tracing
 ├── truncation/   # Event truncation service
-└── uibackend/    # Admin UI HTTP API
+├── uiembed/      # Vendored Python Fleuve frontend_dist (embedded via dist/)
+└── uibackend/    # Admin UI HTTP API + static file serving
 ```
 
 ## Python compatibility
@@ -241,7 +259,7 @@ This Go port is **wire-compatible** with the [Python Fleuve](https://github.com/
 
 **Behavior** (ordering, at-least-once vs exactly-once expectations, consumer offsets, recovery): **Python is the reference.** Go should match it; differences are treated as gaps to fix. This repo **does not** support running Python and Go **runners** concurrently on the same stream—use **cutover**, not mixed processing. See [docs/behavior-and-python-parity.md](docs/behavior-and-python-parity.md).
 
-The frontend UI from `fleuve/ui/frontend_dist` works without modification.
+The Python Fleuve UI **`frontend_dist`** is vendored into `pkg/uiembed/dist/` and embedded by default. Use `-frontend` / `FLEUVE_FRONTEND_DIST` only to point at a different build on disk.
 
 ## Binaries
 
@@ -249,7 +267,7 @@ The frontend UI from `fleuve/ui/frontend_dist` works without modification.
 |--------|-------------|
 | `fleuve-runner` | Consumes the event stream (NATS JetStream when `enable_jetstream=true` and `nats_url` is set; otherwise polls `stored_events` via PostgreSQL), runs activities, and applies `EventToCmd` fan-out. Ships with **CounterWorkflow** (`-type CounterWorkflow`, default). |
 | `fleuve-gateway` | REST command API; registers built-in workflows (CounterWorkflow) against PostgreSQL. |
-| `fleuve-ui` | Admin UI: reads workflows, events, activities, delays, and stats from **PostgreSQL**; optional static frontend via `-frontend` / `FLEUVE_FRONTEND_DIST`. |
+| `fleuve-ui` | Admin UI: **vendored Python Fleuve React** bundle + same JSON API over **PostgreSQL**; override disk path with `-frontend` / `FLEUVE_FRONTEND_DIST`. |
 
 Additional workflow types belong in your module: implement `model.Workflow`, register on the gateway, and pass the same type to the runner’s `-type` flag once wired in `cmd/runner`.
 

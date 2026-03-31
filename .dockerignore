@@ -25,7 +25,8 @@ coverage.html
 
 # Build artifacts
 bin/
-dist/
+# Root-only: do not exclude pkg/uiembed/dist (embedded admin UI)
+/dist/
 *.exe
 *.exe~
 *.dll

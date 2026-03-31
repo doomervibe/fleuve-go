@@ -321,7 +321,16 @@ func asBytes(src any) ([]byte, error) {
 		return []byte(v), nil
 	case json.RawMessage:
 		return []byte(v), nil
+	case map[string]interface{}:
+		return json.Marshal(v)
+	case []interface{}:
+		return json.Marshal(v)
 	default:
-		return nil, fmt.Errorf("cannot convert %T to []byte", src)
+		// JSONB/JSON DecodeValue can yield bool, float64, string, etc.
+		b, err := json.Marshal(src)
+		if err != nil {
+			return nil, fmt.Errorf("cannot convert %T to []byte: %w", src, err)
+		}
+		return b, nil
 	}
 }

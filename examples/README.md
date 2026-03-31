@@ -330,17 +330,18 @@ curl -X POST http://localhost:8080/api/workflows \
 
 ### Using the UI
 
+The framework embeds the Python Fleuve **`frontend_dist`** under `pkg/uiembed/dist` (no Node at runtime). Re-vendor after UI changes with `./scripts/vendor-fleuve-ui.sh /path/to/fleuve/ui/frontend_dist`.
+
 1. Start the UI server:
    ```bash
    docker-compose up -d fleuve-ui
+   # or locally:
+   go run ./cmd/ui -addr :3000
    ```
 
-2. Open browser: `http://localhost:3000`
+2. Open the browser: `http://localhost:3000`
 
-3. Navigate to:
-   - **Workflows** → View all workflows
-   - **Events** → View event stream
-   - **Metrics** → View real-time metrics
+3. Use **Dashboard** and **Workflows** in the nav to inspect stats and workflow details.
 
 ---
 

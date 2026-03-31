@@ -18,7 +18,8 @@ import (
 func main() {
 	configPath := flag.String("config", "", "Path to fleuve.toml")
 	addr := flag.String("addr", ":3000", "Address to listen on")
-	frontendDist := flag.String("frontend", "", "Path to frontend dist directory")
+	frontendDist := flag.String("frontend", "", "Path to frontend dist directory (overrides embedded UI)")
+	apiOnly := flag.Bool("api-only", false, "Serve JSON API only at / (no embedded UI)")
 	flag.Parse()
 
 	cfg, err := config.LoadFleuveToml(*configPath)
@@ -51,13 +52,17 @@ func main() {
 	}
 
 	sessionMaker := uibackend.NewPGXPoolSessionMaker(pool)
-	backend := uibackend.NewFleuveUIBackend(sessionMaker, frontendPath)
+	var uiOpts []uibackend.Option
+	if *apiOnly {
+		uiOpts = append(uiOpts, uibackend.WithoutBundledUI())
+	}
+	backend := uibackend.NewFleuveUIBackend(sessionMaker, frontendPath, uiOpts...)
 
 	mux := http.NewServeMux()
 	backend.RegisterRoutes(mux)
 
 	handler := http.Handler(mux)
-	if frontendPath == "" {
+	if !backend.ServesStaticUI() {
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")

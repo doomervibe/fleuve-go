@@ -43,7 +43,7 @@ func (m *stubMaker) NewSession(ctx context.Context) (Session, error) {
 }
 
 func TestUIBackendHealth(t *testing.T) {
-	b := NewFleuveUIBackend(&stubMaker{}, "")
+	b := NewFleuveUIBackend(&stubMaker{}, "", WithoutBundledUI())
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", b.health)
 	rec := httptest.NewRecorder()
@@ -54,7 +54,7 @@ func TestUIBackendHealth(t *testing.T) {
 }
 
 func TestUIBackendWorkflowTypesSessionError(t *testing.T) {
-	b := NewFleuveUIBackend(&stubMaker{err: fmt.Errorf("db unavailable")}, "")
+	b := NewFleuveUIBackend(&stubMaker{err: fmt.Errorf("db unavailable")}, "", WithoutBundledUI())
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/workflow-types", b.getWorkflowTypes)
 	rec := httptest.NewRecorder()
@@ -65,7 +65,7 @@ func TestUIBackendWorkflowTypesSessionError(t *testing.T) {
 }
 
 func TestUIBackendBatchReplayNotImplemented(t *testing.T) {
-	b := NewFleuveUIBackend(&stubMaker{}, "")
+	b := NewFleuveUIBackend(&stubMaker{}, "", WithoutBundledUI())
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/workflows/batch/replay", b.batchReplay)
 	rec := httptest.NewRecorder()
@@ -78,9 +78,9 @@ func TestUIBackendBatchReplayNotImplemented(t *testing.T) {
 }
 
 func TestUIBackendRootJSONWhenNoDist(t *testing.T) {
-	b := NewFleuveUIBackend(&stubMaker{}, "")
+	b := NewFleuveUIBackend(&stubMaker{}, "", WithoutBundledUI())
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", b.root)
+	mux.HandleFunc("GET /{$}", b.root)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != http.StatusOK {
@@ -88,5 +88,30 @@ func TestUIBackendRootJSONWhenNoDist(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "Fleuve") {
 		t.Fatalf("body %q", rec.Body.String())
+	}
+}
+
+func TestUIBackendRootServesEmbeddedIndex(t *testing.T) {
+	b := NewFleuveUIBackend(&stubMaker{}, "")
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", b.root)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<!DOCTYPE html>") && !strings.Contains(body, "<html") {
+		prefixLen := 120
+		if len(body) < prefixLen {
+			prefixLen = len(body)
+		}
+		t.Fatalf("expected HTML, got %q", body[:prefixLen])
+	}
+	if strings.Contains(body, "{{project_title}}") {
+		t.Fatalf("title placeholder should be replaced")
+	}
+	if !strings.Contains(body, `id="root"`) {
+		t.Fatalf("expected React root mount in vendored index")
 	}
 }

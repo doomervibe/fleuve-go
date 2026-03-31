@@ -3,8 +3,11 @@ package uibackend
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
+	"mime"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/doomervibe/fleuve-go/pkg/delay"
 	"github.com/doomervibe/fleuve-go/pkg/postgres"
+	"github.com/doomervibe/fleuve-go/pkg/uiembed"
 )
 
 type SessionMaker interface {
@@ -36,12 +40,15 @@ type FleuveUIBackend struct {
 	delayScheduleModel *postgres.DelaySchedule
 	subscriptionModel  *postgres.Subscription
 	frontendDistPath   string
+	frontendFS         fs.FS
+	disableBundledUI   bool
 	uiTitle            string
 }
 
 func NewFleuveUIBackend(
 	sessionMaker SessionMaker,
 	frontendDistPath string,
+	opts ...Option,
 ) *FleuveUIBackend {
 	uiTitle := os.Getenv("FLEUVE_UI_TITLE")
 	if uiTitle == "" {
@@ -49,16 +56,74 @@ func NewFleuveUIBackend(
 		uiTitle = strings.Title(strings.ReplaceAll(filepath.Base(cwd), "_", " "))
 	}
 
-	return &FleuveUIBackend{
+	b := &FleuveUIBackend{
 		sessionMaker:     sessionMaker,
 		frontendDistPath: frontendDistPath,
 		uiTitle:          uiTitle,
 	}
+	for _, o := range opts {
+		o(b)
+	}
+	if frontendDistPath == "" && !b.disableBundledUI {
+		b.frontendFS = uiembed.Dist
+	}
+	return b
+}
+
+// ServesStaticUI is true when index.html is served from disk or the embedded bundle.
+func (b *FleuveUIBackend) ServesStaticUI() bool {
+	return b.frontendDistPath != "" || b.frontendFS != nil
+}
+
+func (b *FleuveUIBackend) normalizeFrontendRel(rel string) string {
+	rel = path.Clean("/" + rel)
+	return strings.TrimPrefix(rel, "/")
+}
+
+func (b *FleuveUIBackend) readFrontend(rel string) ([]byte, error) {
+	rel = b.normalizeFrontendRel(rel)
+	if b.frontendDistPath != "" {
+		return os.ReadFile(filepath.Join(b.frontendDistPath, rel))
+	}
+	if b.frontendFS != nil {
+		return fs.ReadFile(b.frontendFS, rel)
+	}
+	return nil, os.ErrNotExist
+}
+
+func (b *FleuveUIBackend) frontendFileExists(rel string) bool {
+	rel = b.normalizeFrontendRel(rel)
+	if b.frontendDistPath != "" {
+		_, err := os.Stat(filepath.Join(b.frontendDistPath, rel))
+		return err == nil
+	}
+	if b.frontendFS != nil {
+		_, err := fs.Stat(b.frontendFS, rel)
+		return err == nil
+	}
+	return false
+}
+
+func (b *FleuveUIBackend) writeFrontendResponse(w http.ResponseWriter, r *http.Request, rel string) {
+	data, err := b.readFrontend(rel)
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	ext := filepath.Ext(rel)
+	ct := mime.TypeByExtension(ext)
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
 }
 
 func (b *FleuveUIBackend) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", b.health)
-	mux.HandleFunc("GET /", b.root)
+	// /{$} is exact root only; avoids conflicting with GET /{full_path...} (Go 1.22+ ServeMux).
+	mux.HandleFunc("GET /{$}", b.root)
 	mux.HandleFunc("GET /api/workflow-types", b.getWorkflowTypes)
 	mux.HandleFunc("GET /api/workflows", b.listWorkflows)
 	mux.HandleFunc("GET /api/workflows/{workflow_id}", b.getWorkflow)
@@ -83,12 +148,9 @@ func (b *FleuveUIBackend) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *FleuveUIBackend) root(w http.ResponseWriter, r *http.Request) {
-	if b.frontendDistPath != "" {
-		indexPath := filepath.Join(b.frontendDistPath, "index.html")
-		if _, err := os.Stat(indexPath); err == nil {
-			b.serveIndexHTML(w, r)
-			return
-		}
+	if b.ServesStaticUI() && b.frontendFileExists("index.html") {
+		b.serveIndexHTML(w, r)
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "ok",
@@ -98,8 +160,7 @@ func (b *FleuveUIBackend) root(w http.ResponseWriter, r *http.Request) {
 }
 
 func (b *FleuveUIBackend) serveIndexHTML(w http.ResponseWriter, r *http.Request) {
-	indexPath := filepath.Join(b.frontendDistPath, "index.html")
-	content, err := os.ReadFile(indexPath)
+	content, err := b.readFrontend("index.html")
 	if err != nil {
 		http.Error(w, "index.html not found", http.StatusNotFound)
 		return
@@ -115,16 +176,20 @@ func (b *FleuveUIBackend) serveIndexHTML(w http.ResponseWriter, r *http.Request)
 }
 
 func (b *FleuveUIBackend) serveAssets(w http.ResponseWriter, r *http.Request) {
-	if b.frontendDistPath == "" {
+	if !b.ServesStaticUI() {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	filePath := filepath.Join(b.frontendDistPath, r.URL.Path)
-	http.ServeFile(w, r, filePath)
+	rel := strings.TrimPrefix(r.URL.Path, "/")
+	if !b.frontendFileExists(rel) {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	b.writeFrontendResponse(w, r, rel)
 }
 
 func (b *FleuveUIBackend) serveReactApp(w http.ResponseWriter, r *http.Request) {
-	if b.frontendDistPath == "" {
+	if !b.ServesStaticUI() {
 		http.Error(w, "web app not built", http.StatusNotFound)
 		return
 	}
@@ -135,9 +200,9 @@ func (b *FleuveUIBackend) serveReactApp(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	filePath := filepath.Join(b.frontendDistPath, fullPath)
-	if _, err := os.Stat(filePath); err == nil {
-		http.ServeFile(w, r, filePath)
+	rel := filepath.ToSlash(strings.TrimPrefix(fullPath, "/"))
+	if rel != "" && b.frontendFileExists(rel) {
+		b.writeFrontendResponse(w, r, rel)
 		return
 	}
 
@@ -171,7 +236,7 @@ func (b *FleuveUIBackend) getWorkflowTypes(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var types []WorkflowTypeInfo
+	types := make([]WorkflowTypeInfo, 0)
 	for _, row := range rows {
 		var ti WorkflowTypeInfo
 		var lastEventAt *time.Time
@@ -215,30 +280,39 @@ func (b *FleuveUIBackend) listWorkflows(w http.ResponseWriter, r *http.Request) 
 		offset = 0
 	}
 
+	// DISTINCT ON avoids DISTINCT + window functions (fragile) and matches “one row per workflow”.
 	query := `
-		SELECT DISTINCT workflow_id, workflow_type, 
-		       FIRST_VALUE(workflow_version) OVER (PARTITION BY workflow_id ORDER BY workflow_version DESC) as version,
-		       FIRST_VALUE(at) OVER (PARTITION BY workflow_id ORDER BY workflow_version DESC) as updated_at,
-		       FIRST_VALUE(at) OVER (PARTITION BY workflow_id ORDER BY workflow_version ASC) as created_at,
-		       FIRST_VALUE(body) OVER (PARTITION BY workflow_id ORDER BY workflow_version DESC) as state
-		FROM stored_events
-		WHERE 1=1
+		SELECT sub.workflow_id, sub.workflow_type, sub.version, sub.updated_at, sub.created_at, sub.state
+		FROM (
+			SELECT DISTINCT ON (se.workflow_id)
+				se.workflow_id,
+				se.workflow_type,
+				se.workflow_version AS version,
+				se.at AS updated_at,
+				(SELECT MIN(e.at) FROM stored_events e WHERE e.workflow_id = se.workflow_id) AS created_at,
+				se.body AS state
+			FROM stored_events se
+			WHERE 1=1
 	`
 	args := []interface{}{}
 	argIdx := 1
 
 	if workflowType != "" {
-		query += " AND workflow_type = $" + strconv.Itoa(argIdx)
+		query += " AND se.workflow_type = $" + strconv.Itoa(argIdx)
 		args = append(args, workflowType)
 		argIdx++
 	}
 	if search != "" {
-		query += " AND workflow_id LIKE $" + strconv.Itoa(argIdx)
+		query += " AND se.workflow_id LIKE $" + strconv.Itoa(argIdx)
 		args = append(args, "%"+search+"%")
 		argIdx++
 	}
 
-	query += " LIMIT $" + strconv.Itoa(argIdx) + " OFFSET $" + strconv.Itoa(argIdx+1)
+	query += `
+			ORDER BY se.workflow_id, se.workflow_version DESC, se.at DESC
+		) sub
+		ORDER BY sub.updated_at DESC NULLS LAST, sub.workflow_id ASC
+		LIMIT $` + strconv.Itoa(argIdx) + ` OFFSET $` + strconv.Itoa(argIdx+1)
 	args = append(args, limit, offset)
 
 	rows, err := sess.Query(ctx, query, args...)
@@ -247,7 +321,7 @@ func (b *FleuveUIBackend) listWorkflows(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	var workflows []WorkflowSummary
+	workflows := make([]WorkflowSummary, 0)
 	for _, row := range rows {
 		var ws WorkflowSummary
 		var stateBytes []byte
@@ -256,6 +330,9 @@ func (b *FleuveUIBackend) listWorkflows(w http.ResponseWriter, r *http.Request) 
 		}
 		if len(stateBytes) > 0 {
 			json.Unmarshal(stateBytes, &ws.State)
+		}
+		if ws.State == nil {
+			ws.State = map[string]interface{}{}
 		}
 		workflows = append(workflows, ws)
 	}
@@ -308,6 +385,9 @@ func (b *FleuveUIBackend) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	if len(stateBytes) > 0 {
 		json.Unmarshal(stateBytes, &wd.State)
 	}
+	if wd.State == nil {
+		wd.State = map[string]interface{}{}
+	}
 	wd.Subscriptions = []map[string]string{}
 
 	writeJSON(w, http.StatusOK, wd)
@@ -346,7 +426,7 @@ func (b *FleuveUIBackend) getWorkflowEvents(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	var events []EventResponse
+	events := make([]EventResponse, 0)
 	for _, row := range rows {
 		var er EventResponse
 		var bodyBytes, metaBytes []byte
@@ -358,6 +438,12 @@ func (b *FleuveUIBackend) getWorkflowEvents(w http.ResponseWriter, r *http.Reque
 		}
 		if len(metaBytes) > 0 {
 			json.Unmarshal(metaBytes, &er.Metadata)
+		}
+		if er.Body == nil {
+			er.Body = map[string]interface{}{}
+		}
+		if er.Metadata == nil {
+			er.Metadata = map[string]interface{}{}
 		}
 		events = append(events, er)
 	}
@@ -396,7 +482,7 @@ func (b *FleuveUIBackend) getWorkflowStateAtVersion(w http.ResponseWriter, r *ht
 		At      string                 `json:"at"`
 	}
 
-	var events []eventInfo
+	events := make([]eventInfo, 0)
 	for _, row := range rows {
 		var ei eventInfo
 		var bodyBytes []byte
@@ -406,6 +492,9 @@ func (b *FleuveUIBackend) getWorkflowStateAtVersion(w http.ResponseWriter, r *ht
 		}
 		if len(bodyBytes) > 0 {
 			json.Unmarshal(bodyBytes, &ei.Body)
+		}
+		if ei.Body == nil {
+			ei.Body = map[string]interface{}{}
 		}
 		ei.At = at.Format(time.RFC3339)
 		events = append(events, ei)
@@ -465,7 +554,7 @@ func (b *FleuveUIBackend) getWorkflowStateDiff(w http.ResponseWriter, r *http.Re
 	}
 
 	toEvents := func(rows []Row) []eventInfo {
-		var events []eventInfo
+		events := make([]eventInfo, 0)
 		for _, row := range rows {
 			var ei eventInfo
 			var bodyBytes []byte
@@ -475,6 +564,9 @@ func (b *FleuveUIBackend) getWorkflowStateDiff(w http.ResponseWriter, r *http.Re
 			}
 			if len(bodyBytes) > 0 {
 				json.Unmarshal(bodyBytes, &ei.Body)
+			}
+			if ei.Body == nil {
+				ei.Body = map[string]interface{}{}
 			}
 			ei.At = at.Format(time.RFC3339)
 			events = append(events, ei)
@@ -569,7 +661,7 @@ func (b *FleuveUIBackend) listEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var events []EventResponse
+	events := make([]EventResponse, 0)
 	for _, row := range rows {
 		var er EventResponse
 		var bodyBytes, metaBytes []byte
@@ -581,6 +673,12 @@ func (b *FleuveUIBackend) listEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(metaBytes) > 0 {
 			json.Unmarshal(metaBytes, &er.Metadata)
+		}
+		if er.Body == nil {
+			er.Body = map[string]interface{}{}
+		}
+		if er.Metadata == nil {
+			er.Metadata = map[string]interface{}{}
 		}
 		events = append(events, er)
 	}
@@ -621,6 +719,12 @@ func (b *FleuveUIBackend) getEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(metaBytes) > 0 {
 		json.Unmarshal(metaBytes, &er.Metadata)
+	}
+	if er.Body == nil {
+		er.Body = map[string]interface{}{}
+	}
+	if er.Metadata == nil {
+		er.Metadata = map[string]interface{}{}
 	}
 
 	writeJSON(w, http.StatusOK, er)
@@ -708,7 +812,7 @@ func (b *FleuveUIBackend) listActivitiesWithFilter(w http.ResponseWriter, r *htt
 		return
 	}
 
-	var activities []ActivityResponse
+	activities := make([]ActivityResponse, 0)
 	for _, row := range rows {
 		var ar ActivityResponse
 		var checkpointBytes []byte
@@ -718,6 +822,9 @@ func (b *FleuveUIBackend) listActivitiesWithFilter(w http.ResponseWriter, r *htt
 		}
 		if len(checkpointBytes) > 0 {
 			json.Unmarshal(checkpointBytes, &ar.Checkpoint)
+		}
+		if ar.Checkpoint == nil {
+			ar.Checkpoint = map[string]interface{}{}
 		}
 		activities = append(activities, ar)
 	}
@@ -797,7 +904,7 @@ func (b *FleuveUIBackend) listDelaysWithFilter(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var delays []DelayResponse
+	delays := make([]DelayResponse, 0)
 	for _, row := range rows {
 		var dr DelayResponse
 		var nextCmdBytes []byte
@@ -808,6 +915,9 @@ func (b *FleuveUIBackend) listDelaysWithFilter(w http.ResponseWriter, r *http.Re
 		}
 		if len(nextCmdBytes) > 0 {
 			json.Unmarshal(nextCmdBytes, &dr.NextCommand)
+		}
+		if dr.NextCommand == nil {
+			dr.NextCommand = map[string]interface{}{}
 		}
 		dr.CronExpression = cronExpr
 		dr.CronTimezone = tz

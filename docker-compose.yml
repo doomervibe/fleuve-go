@@ -107,8 +107,6 @@ services:
       FLEUVE_OTEL_SERVICE_NAME: fleuve-ui
     ports:
       - "3000:3000"
-    volumes:
-      - ../fleuve/ui/frontend_dist:/app/frontend_dist:ro
     networks:
       - fleuve-network
     restart: unless-stopped
