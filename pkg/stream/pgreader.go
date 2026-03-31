@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 )
@@ -181,10 +182,12 @@ func (r *PGReader) SetCommittedOffset(offset int64) {
 	r.committedOffset = offset
 	r.mu.Unlock()
 
-	r.db.ExecContext(context.Background(), `
+	if _, err := r.db.ExecContext(context.Background(), `
         INSERT INTO offsets (reader, last_read_event_no) VALUES ($1, $2)
         ON CONFLICT (reader) DO UPDATE SET last_read_event_no = EXCLUDED.last_read_event_no
-    `, r.readerName, offset)
+    `, r.readerName, offset); err != nil {
+		log.Printf("pgreader offset persist (%s): %v", r.readerName, err)
+	}
 }
 
 func (r *PGReader) LastReadEventGID() int64 {

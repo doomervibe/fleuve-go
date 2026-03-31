@@ -105,8 +105,11 @@ func main() {
 	gw.RegisterRoutes(mux)
 
 	server := &http.Server{
-		Addr:    *addr,
-		Handler: mux,
+		Addr:              *addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
 	}
 
 	go func() {

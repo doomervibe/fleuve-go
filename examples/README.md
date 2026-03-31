@@ -1,6 +1,8 @@
 # Fleuve Go Examples
 
-This directory contains comprehensive examples demonstrating Fleuve's capabilities.
+> **Stack setup** (Postgres, gateway, runner, UI): see [docs/getting-started.md](../docs/getting-started.md).
+
+This directory contains examples demonstrating Fleuve's capabilities.
 
 ## Table of Contents
 

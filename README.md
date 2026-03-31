@@ -1,284 +1,137 @@
+<div align="center">
+<img src="docs/images/fleuve-go-logo.png" alt="Fleuve Go logo — flowing river streams" width="140" height="140">
+</div>
+
 # Fleuve Go
 
-A faithful Go port of the [Fleuve](https://github.com/anomaly/fleuve) event-sourced workflow framework.
+**Event-sourced workflows in Go**, wire-compatible with [Fleuve (Python)](https://github.com/anomaly/fleuve): same PostgreSQL schema, HTTP command shapes, optional NATS JetStream payloads, and admin UI bundle.
 
-## Overview
+| | |
+|--|--|
+| **Module** | `github.com/doomervibe/fleuve-go` |
+| **Go** | 1.25+ |
+| **Stores** | PostgreSQL (events, offsets, activities, delays, …) |
+| **Streaming** | NATS JetStream when enabled, else PostgreSQL polling |
 
-Fleuve is a **type-safe, event-sourced workflow framework** with:
-- Durable workflows backed by **PostgreSQL** (events as source of truth)
-- **NATS** JetStream/KV for ephemeral state caching and messaging
-- Horizontal scaling via **partitioning**
-- **Activities** (side effects) with retries and checkpoints
-- **Delays** and **cron**-based scheduling
-- **Snapshots** and **event truncation**
-- **Command gateway** (REST)
-- **Admin UI** (wire-compatible with Python version)
+---
 
-## Installation
+## What you get
 
-```bash
-go get github.com/doomervibe/fleuve-go
-```
+- **Durable workflows** — append-only `stored_events`, versioned per `workflow_id`
+- **Command gateway** — REST API to create workflows and submit commands
+- **Runner** — consumes the stream (JetStream or PG), runs activities, advances offsets safely
+- **Admin UI** — vendored Vite `frontend_dist` embedded in `fleuve-ui` (`pkg/uiembed`), same API the Python console uses
+- **Activities** — retries, checkpoints, persistence in `activities`
+- **Delays & cron** — `delay_schedules` (see Python parity for full semantics)
 
-## Quick Start
+**Important:** Do not run **Python and Go runners** concurrently on the same stream scope. Use **cutover**, not mixed consumers. See [docs/behavior-and-python-parity.md](docs/behavior-and-python-parity.md).
 
-### 1. Define Your Workflow
+---
 
-```go
-package main
+## Documentation
 
-import (
-    "github.com/doomervibe/fleuve-go/pkg/model"
-)
+| Guide | Purpose |
+|-------|---------|
+| [**Getting started**](docs/getting-started.md) | Postgres, migrations, first run, counter example, gateway + UI |
+| [**Architecture**](docs/architecture.md) | Components, data flow, diagrams |
+| [**Configuration**](docs/configuration.md) | `fleuve.toml`, `FLEUVE_*`, OpenTelemetry, UI flags |
+| [**HTTP API**](docs/http-api.md) | Command gateway + admin JSON API |
+| [**Packages**](docs/packages.md) | `pkg/*` layout and responsibilities |
+| [**Bundled UI**](docs/ui-embed.md) | Vendored admin frontend (`pkg/uiembed`) |
+| [**Operations**](docs/operations.md) | Deploy order, migrations, observability |
+| [**Python integration**](docs/INTEGRATION.md) | Sharing a DB with Python Fleuve |
+| [**Python parity**](docs/behavior-and-python-parity.md) | Ordering, offsets, recovery |
 
-// Define your state
-type MyState struct {
-    model.StateBase
-    Counter int `json:"counter"`
-}
+Full index: [docs/README.md](docs/README.md).
 
-// Define your events
-type CounterIncremented struct {
-    model.EventBase
-    Amount int `json:"amount"`
-}
+---
 
-func (e *CounterIncremented) GetType() string { return "counter_incremented" }
+## Quick start (minimal)
 
-// Define your commands
-type IncrementCounter struct {
-    Amount int `json:"amount"`
-}
+**1. Database** — apply SQL in `migrations/` in filename order (or use Compose below).
 
-// Implement the Workflow interface
-type MyWorkflow struct{}
-
-func (w *MyWorkflow) Name() string { return "MyWorkflow" }
-func (w *MyWorkflow) SchemaVersion() int { return 1 }
-
-func (w *MyWorkflow) Upcast(eventType string, schemaVersion int, rawData map[string]any) map[string]any {
-    return rawData
-}
-
-func (w *MyWorkflow) Decide(state model.State, cmd model.Command) ([]model.Event, *model.Rejection) {
-    switch c := cmd.(type) {
-    case *IncrementCounter:
-        return []model.Event{&CounterIncremented{Amount: c.Amount}}, nil
-    }
-    return nil, nil
-}
-
-func (w *MyWorkflow) Evolve(state model.State, event model.Event) model.State {
-    var s *MyState
-    if state != nil {
-        s = state.(*MyState).Copy().(*MyState)
-    } else {
-        s = &MyState{Counter: 0}
-    }
-    
-    switch e := event.(type) {
-    case *CounterIncremented:
-        s.Counter += e.Amount
-    }
-    return s
-}
-
-func (w *MyWorkflow) EventToCmd(e model.Event) model.Command {
-    return nil
-}
-
-func (w *MyWorkflow) IsFinalEvent(e model.Event) bool {
-    return false
-}
-```
-
-### 2. Run the Workflow
-
-```go
-package main
-
-import (
-    "context"
-    "database/sql"
-    "log"
-    
-    "github.com/doomervibe/fleuve-go/pkg/config"
-    "github.com/doomervibe/fleuve-go/pkg/repo"
-    "github.com/doomervibe/fleuve-go/pkg/runner"
-    "github.com/doomervibe/fleuve-go/pkg/stream"
-)
-
-func main() {
-    cfg, _ := config.LoadFleuveToml("")
-    
-    db, _ := sql.Open("postgres", cfg.DatabaseURL)
-    defer db.Close()
-    
-    workflow := &MyWorkflow{}
-    storage := repo.NewInProcessEphemeralStorage(10000)
-    
-    repository := repo.NewRepo(
-        db,
-        workflow.Name(),
-        workflow,
-        storage,
-    )
-    
-    reader := stream.NewPGReader(db, workflow.Name()+"_runner", 100)
-    reader.Init(context.Background())
-    
-    r := runner.NewWorkflowsRunner(
-        workflow,
-        repository,
-        reader,
-        nil, // side effects
-        runner.WithMaxInflight(cfg.MaxInflight),
-    )
-    
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-    
-    if err := r.Start(ctx); err != nil {
-        log.Fatal(err)
-    }
-    
-    select {}
-}
-```
-
-### 3. Start the Command Gateway
-
-```bash
-go build -o fleuve-gateway ./cmd/gateway
-./fleuve-gateway -addr :8080
-```
-
-### 4. Start the Admin UI
-
-A **bundled** dashboard ships in the binary (`pkg/uiembed`): run the UI server and open [http://localhost:3000](http://localhost:3000).
+**2. Environment**
 
 ```bash
 export FLEUVE_DATABASE_URL="postgresql://user:pass@localhost:5432/fleuve?sslmode=disable"
-go run ./cmd/ui -addr :3000
+# Optional for JetStream mode:
+export FLEUVE_NATS_URL="nats://localhost:4222"
+export FLEUVE_ENABLE_JETSTREAM=true
 ```
 
-Optional:
+**3. Binaries**
 
-- **Override embedded UI**: `./fleuve-ui -frontend /other/frontend_dist` or `FLEUVE_FRONTEND_DIST` (e.g. a newer local build while developing the React app).
-- **API only** (JSON at `/`, CORS enabled): `./fleuve-ui -api-only`.
+```bash
+go build -o fleuve-runner   ./cmd/runner
+go build -o fleuve-gateway ./cmd/gateway
+go build -o fleuve-ui      ./cmd/ui
+```
 
-#### Vendored UI (`pkg/uiembed/dist`)
+**4. Run** (three terminals, same `FLEUVE_DATABASE_URL`)
 
-The **same Vite `frontend_dist`** as the Python Fleuve UI is **committed under `pkg/uiembed/dist/`** and embedded with `go:embed`, so `fleuve-ui` matches the Python web console without Node at runtime.
+```bash
+./fleuve-runner          # default -type CounterWorkflow
+./fleuve-gateway -addr :8080
+./fleuve-ui -addr :3000  # http://localhost:3000
+```
 
-To **refresh** after you rebuild the React app:
+**5. Smoke test** — create a counter workflow:
+
+```bash
+curl -sS -X POST http://localhost:8080/commands/CounterWorkflow \
+  -H "Content-Type: application/json" \
+  -d '{"workflow_id":"demo-1","command_type":"increment","payload":{"amount":1}}'
+```
+
+Populate data without the gateway: [examples/counter/README.md](examples/counter/README.md) (`go run ./examples/counter` from repo root with `FLEUVE_DATABASE_URL` set).
+
+---
+
+## Docker Compose
+
+```bash
+docker compose up -d postgres nats fleuve-runner fleuve-gateway fleuve-ui
+```
+
+Services and ports match [docker-compose.yml](docker-compose.yml). Optional profiles: `tracing`, `monitoring`.
+
+---
+
+## Built-in workflow: `CounterWorkflow`
+
+Registered by `fleuve-gateway` and `fleuve-runner` via [`pkg/fleuvecmd`](pkg/fleuvecmd/register.go). Gateway command types: **`increment`** (payload `amount`), **`reset`**.
+
+Add more types in **your** module: implement `model.Workflow`, `repo.NewPGXRepo`, register on the gateway, and run the runner with a matching `-type` once wired in `cmd/runner`.
+
+---
+
+## Vendored admin UI
+
+Static assets live under **`pkg/uiembed/dist/`** and are embedded at compile time. To refresh from a Python Fleuve UI build:
 
 ```bash
 ./scripts/vendor-fleuve-ui.sh /path/to/fleuve/ui/frontend_dist
-# or: FLEUVE_PYTHON_UI_DIST=/path/to/frontend_dist ./scripts/vendor-fleuve-ui.sh
-go build ./cmd/ui
+go build -o fleuve-ui ./cmd/ui
 ```
 
-## Configuration
+Override at runtime: `-frontend /path` or `FLEUVE_FRONTEND_DIST`. JSON-only mode: `fleuve-ui -api-only`.
 
-Configuration is loaded from `fleuve.toml` and environment variables:
+---
 
-```toml
-[fleuve]
-database_url = "postgresql://user:pass@localhost:5432/fleuve"
-nats_url = "nats://localhost:4222"
-snapshot_interval = 100
-enable_truncation = true
-max_inflight = 4
-max_events_per_second = 500.0
-```
-
-Environment variables (prefixed with `FLEUVE_`) override TOML settings:
-
-```bash
-export FLEUVE_DATABASE_URL="postgresql://..."
-export FLEUVE_MAX_INFLIGHT=8
-```
-
-## HTTP APIs
-
-### Command Gateway
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/commands/{workflow_type}` | POST | Create a new workflow |
-| `/commands/{workflow_type}/{workflow_id}` | POST | Process a command |
-| `/commands/{workflow_type}/{workflow_id}/pause` | POST | Pause a workflow |
-| `/commands/{workflow_type}/{workflow_id}/resume` | POST | Resume a workflow |
-| `/commands/{workflow_type}/{workflow_id}/cancel` | POST | Cancel a workflow |
-
-### Admin UI API
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/api/workflow-types` | GET | List workflow types |
-| `/api/workflows` | GET | List workflows |
-| `/api/workflows/{id}` | GET | Get workflow details |
-| `/api/workflows/{id}/events` | GET | Get workflow events |
-| `/api/activities` | GET | List activities |
-| `/api/delays` | GET | List delays |
-| `/api/stats` | GET | Dashboard statistics |
-
-## Package Structure
+## Repository layout
 
 ```
-pkg/
-├── actions/      # Action executor with retry/checkpoint logic
-├── config/       # TOML + env var configuration
-├── delay/        # Cron delay scheduler
-├── external/     # External NATS messaging
-├── gateway/      # HTTP command gateway
-├── metrics/      # Prometheus metrics
-├── model/        # Core domain models
-├── postgres/     # PostgreSQL ORM models
-├── repo/         # Repository (persistence layer)
-├── runner/       # Main event loop runner
-├── scaling/      # Partition scaling logic
-├── stream/       # Event stream readers
-├── testing/      # Testing harness
-├── tracing/      # OpenTelemetry tracing
-├── truncation/   # Event truncation service
-├── uiembed/      # Vendored Python Fleuve frontend_dist (embedded via dist/)
-└── uibackend/    # Admin UI HTTP API + static file serving
+cmd/
+  gateway/    # REST command API
+  runner/     # Stream consumer + activities
+  ui/         # Admin API + static UI
+migrations/   # PostgreSQL schema (apply in order)
+pkg/          # Libraries (see docs/packages.md)
+examples/     # counter/, order/
+scripts/      # vendor-fleuve-ui.sh
 ```
 
-## Python compatibility
-
-This Go port is **wire-compatible** with the [Python Fleuve](https://github.com/anomaly/fleuve) implementation:
-
-- **Same HTTP API endpoints and JSON response shapes**
-- **Same PostgreSQL schema** (can run against existing databases)
-- **Same NATS JetStream message format**
-- **Same configuration keys** (`fleuve.toml` + `FLEUVE_*` env vars)
-
-**Behavior** (ordering, at-least-once vs exactly-once expectations, consumer offsets, recovery): **Python is the reference.** Go should match it; differences are treated as gaps to fix. This repo **does not** support running Python and Go **runners** concurrently on the same stream—use **cutover**, not mixed processing. See [docs/behavior-and-python-parity.md](docs/behavior-and-python-parity.md).
-
-The Python Fleuve UI **`frontend_dist`** is vendored into `pkg/uiembed/dist/` and embedded by default. Use `-frontend` / `FLEUVE_FRONTEND_DIST` only to point at a different build on disk.
-
-## Binaries
-
-| Binary | Description |
-|--------|-------------|
-| `fleuve-runner` | Consumes the event stream (NATS JetStream when `enable_jetstream=true` and `nats_url` is set; otherwise polls `stored_events` via PostgreSQL), runs activities, and applies `EventToCmd` fan-out. Ships with **CounterWorkflow** (`-type CounterWorkflow`, default). |
-| `fleuve-gateway` | REST command API; registers built-in workflows (CounterWorkflow) against PostgreSQL. |
-| `fleuve-ui` | Admin UI: **vendored Python Fleuve React** bundle + same JSON API over **PostgreSQL**; override disk path with `-frontend` / `FLEUVE_FRONTEND_DIST`. |
-
-Additional workflow types belong in your module: implement `model.Workflow`, register on the gateway, and pass the same type to the runner’s `-type` flag once wired in `cmd/runner`.
-
-## Dependencies
-
-- `github.com/robfig/cron/v3` - Cron expression parsing
-- `github.com/pelletier/go-toml/v2` - TOML configuration
-
-## Operations
-
-For an internal runbook (deploy order, migrations, integration tests, observability), see [docs/operations.md](docs/operations.md). For Python vs Go semantics (ordering, offsets, recovery), see [docs/behavior-and-python-parity.md](docs/behavior-and-python-parity.md).
+---
 
 ## License
 

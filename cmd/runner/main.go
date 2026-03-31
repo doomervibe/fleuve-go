@@ -89,7 +89,9 @@ func main() {
 			log.Fatalf("nats reader: %v", err)
 		}
 		if err := nr.Init(ctx); err != nil {
-			nr.Close()
+			if cerr := nr.Close(); cerr != nil {
+				log.Printf("nats close after init failure: %v", cerr)
+			}
 			log.Fatalf("nats init: %v", err)
 		}
 		streamReader = nr

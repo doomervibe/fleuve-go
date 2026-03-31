@@ -441,8 +441,11 @@ func StartMetricsServer(addr string) error {
 	metrics.RegisterMetricsEndpoint(mux)
 
 	server := &http.Server{
-		Addr:    addr,
-		Handler: mux,
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
 
 	log.Printf("Starting metrics server on %s", addr)

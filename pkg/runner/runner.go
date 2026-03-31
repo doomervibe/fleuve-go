@@ -342,6 +342,7 @@ func (r *WorkflowsRunner) run() {
 			r.wg.Add(1)
 			go func(ev *stream.ConsumedEvent) {
 				defer r.wg.Done()
+				defer cancel()
 				defer func() {
 					pendingMu.Lock()
 					delete(pending, ev.GlobalID)

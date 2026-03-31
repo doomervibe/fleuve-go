@@ -128,7 +128,9 @@ func (e *ActionExecutor) recoverInterruptedActions() {
 			slog.Warn("activity_recovery_load_event", "workflow_id", wfID, "event_no", evNo, "err", err)
 			continue
 		}
-		e.ExecuteAction(ctx, me)
+		if err := e.ExecuteAction(ctx, me); err != nil {
+			slog.Warn("activity_recovery_execute", "workflow_id", wfID, "event_no", evNo, "err", err)
+		}
 	}
 }
 

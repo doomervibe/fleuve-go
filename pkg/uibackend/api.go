@@ -80,10 +80,32 @@ func (b *FleuveUIBackend) normalizeFrontendRel(rel string) string {
 	return strings.TrimPrefix(rel, "/")
 }
 
+// resolveDiskFrontendPath returns an absolute path under frontendDistPath, or fs.ErrNotExist if rel escapes the root.
+func (b *FleuveUIBackend) resolveDiskFrontendPath(rel string) (string, error) {
+	root, err := filepath.Abs(b.frontendDistPath)
+	if err != nil {
+		return "", err
+	}
+	full := filepath.Join(root, rel)
+	absJoined, err := filepath.Abs(full)
+	if err != nil {
+		return "", err
+	}
+	sep := string(os.PathSeparator)
+	if absJoined != root && !strings.HasPrefix(absJoined, root+sep) {
+		return "", fs.ErrNotExist
+	}
+	return absJoined, nil
+}
+
 func (b *FleuveUIBackend) readFrontend(rel string) ([]byte, error) {
 	rel = b.normalizeFrontendRel(rel)
 	if b.frontendDistPath != "" {
-		return os.ReadFile(filepath.Join(b.frontendDistPath, rel))
+		p, err := b.resolveDiskFrontendPath(rel)
+		if err != nil {
+			return nil, err
+		}
+		return os.ReadFile(p) // #nosec G304 -- path confined by resolveDiskFrontendPath
 	}
 	if b.frontendFS != nil {
 		return fs.ReadFile(b.frontendFS, rel)
@@ -94,7 +116,11 @@ func (b *FleuveUIBackend) readFrontend(rel string) ([]byte, error) {
 func (b *FleuveUIBackend) frontendFileExists(rel string) bool {
 	rel = b.normalizeFrontendRel(rel)
 	if b.frontendDistPath != "" {
-		_, err := os.Stat(filepath.Join(b.frontendDistPath, rel))
+		p, err := b.resolveDiskFrontendPath(rel)
+		if err != nil {
+			return false
+		}
+		_, err = os.Stat(p) // #nosec G304 -- path confined by resolveDiskFrontendPath
 		return err == nil
 	}
 	if b.frontendFS != nil {
@@ -116,8 +142,9 @@ func (b *FleuveUIBackend) writeFrontendResponse(w http.ResponseWriter, r *http.R
 		ct = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", ct)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(data)
+	_, _ = w.Write(data) // #nosec G705 -- trusted static UI assets from dist or embed
 }
 
 func (b *FleuveUIBackend) RegisterRoutes(mux *http.ServeMux) {
@@ -171,8 +198,9 @@ func (b *FleuveUIBackend) serveIndexHTML(w http.ResponseWriter, r *http.Request)
 	}
 	html := strings.ReplaceAll(string(content), "{{project_title}}", resolvedTitle)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(html))
+	_, _ = w.Write([]byte(html)) // #nosec G705 -- trusted index.html from dist or embed
 }
 
 func (b *FleuveUIBackend) serveAssets(w http.ResponseWriter, r *http.Request) {
@@ -1049,7 +1077,7 @@ func (b *FleuveUIBackend) batchReplay(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, detail string) {

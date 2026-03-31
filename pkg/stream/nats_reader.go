@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -143,10 +144,11 @@ func (r *NATSReader) Init(ctx context.Context) error {
 		err := r.offsetPool.QueryRow(ctx, `
 			SELECT COALESCE(last_read_event_no, 0) FROM offsets WHERE reader = $1
 		`, r.offsetReader).Scan(&o)
-		if err == nil {
+		if err == nil && o >= 0 {
+			u := uint64(o)
 			r.mu.Lock()
-			r.committedSeq = uint64(o)
-			r.lastJSAcked = uint64(o)
+			r.committedSeq = u
+			r.lastJSAcked = u
 			r.mu.Unlock()
 		} else if !errors.Is(err, pgx.ErrNoRows) {
 			log.Printf("NATS offset load (%s): %v", r.offsetReader, err)
@@ -166,19 +168,23 @@ func (r *NATSReader) IterEvents(ctx context.Context) <-chan *ConsumedEvent {
 	cc, err := r.consumer.Consume(func(msg jetstream.Msg) {
 		meta, err := msg.Metadata()
 		if err != nil {
-			msg.Nak()
+			if nakErr := msg.Nak(); nakErr != nil {
+				log.Printf("NATS nak after metadata error: %v", nakErr)
+			}
 			return
 		}
 
 		event, err := r.parseMessage(msg)
 		if err != nil {
 			log.Printf("Failed to parse NATS message: %v", err)
-			msg.Nak()
+			if nakErr := msg.Nak(); nakErr != nil {
+				log.Printf("NATS nak after parse error: %v", nakErr)
+			}
 			return
 		}
 
 		seq := meta.Sequence.Stream
-		event.GlobalID = int64(seq)
+		event.GlobalID = jetStreamSeqToGlobalID(seq)
 
 		r.mu.Lock()
 		r.pendingAcks[seq] = msg
@@ -190,7 +196,9 @@ func (r *NATSReader) IterEvents(ctx context.Context) <-chan *ConsumedEvent {
 			r.mu.Lock()
 			delete(r.pendingAcks, seq)
 			r.mu.Unlock()
-			msg.Nak()
+			if nakErr := msg.Nak(); nakErr != nil {
+				log.Printf("NATS nak on shutdown: %v", nakErr)
+			}
 			return
 		case ch <- event:
 			// Ack deferred until SetCommittedOffset reaches this sequence (after runner processing).
@@ -200,6 +208,10 @@ func (r *NATSReader) IterEvents(ctx context.Context) <-chan *ConsumedEvent {
 	}))
 
 	if err != nil {
+		if r.cancel != nil {
+			r.cancel()
+			r.cancel = nil
+		}
 		close(ch)
 		log.Printf("Failed to start NATS consumer: %v", err)
 		return ch
@@ -231,14 +243,20 @@ func (r *NATSReader) parseMessage(msg jetstream.Msg) (*ConsumedEvent, error) {
 }
 
 func (r *NATSReader) SetStopAtOffset(offset int64) {
+	if offset < 0 {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	seq := uint64(offset)
+	seq := uint64(offset) // #nosec G115 -- offset validated non-negative
 	r.stopAtOffset = &seq
 }
 
 func (r *NATSReader) SetCommittedOffset(offset int64) {
-	target := uint64(offset)
+	if offset < 0 {
+		return
+	}
+	target := uint64(offset) // #nosec G115 -- offset validated non-negative
 	r.mu.Lock()
 	r.committedSeq = target
 	for r.lastJSAcked < target {
@@ -254,7 +272,7 @@ func (r *NATSReader) SetCommittedOffset(offset int64) {
 		delete(r.pendingAcks, next)
 		r.lastJSAcked = next
 	}
-	persisted := int64(r.lastJSAcked)
+	persisted := jetStreamAckedToPersistedOffset(r.lastJSAcked)
 	pool := r.offsetPool
 	key := r.offsetReader
 	r.mu.Unlock()
@@ -276,10 +294,14 @@ func (r *NATSReader) SetCommittedOffset(offset int64) {
 func (r *NATSReader) LastReadEventGID() int64 {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return int64(r.lastDelivered)
+	return jetStreamSeqToGlobalID(r.lastDelivered)
 }
 
 func (r *NATSReader) Close() error {
+	if r.cancel != nil {
+		r.cancel()
+		r.cancel = nil
+	}
 	if r.subscription != nil {
 		r.subscription.Stop()
 	}
@@ -352,4 +374,18 @@ func (s *NATSKVStorage) Put(ctx context.Context, key string, value []byte) (uint
 
 func (s *NATSKVStorage) Delete(ctx context.Context, key string) error {
 	return s.kv.Delete(ctx, key)
+}
+
+func jetStreamSeqToGlobalID(seq uint64) int64 {
+	if seq > uint64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(seq)
+}
+
+func jetStreamAckedToPersistedOffset(lastJSAcked uint64) int64 {
+	if lastJSAcked > uint64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(lastJSAcked)
 }

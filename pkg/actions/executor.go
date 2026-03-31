@@ -138,6 +138,7 @@ func (e *ActionExecutor) ExecuteAction(ctx context.Context, event *model.Consume
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
+		defer cancel()
 		defer func() {
 			e.mu.Lock()
 			delete(e.runningActions[event.WorkflowID], event.EventNo)

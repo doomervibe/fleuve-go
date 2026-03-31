@@ -2,6 +2,8 @@
 
 Checklist for running and maintaining this repo in a trusted environment. This is not a guide for exposing services to the public internet.
 
+**Documentation index:** [docs/README.md](./README.md) · [Getting started](./getting-started.md) · [Configuration](./configuration.md) · [HTTP API](./http-api.md)
+
 **Runner semantics** (ordering, offsets, recovery) and **parity with Python** are described in [behavior-and-python-parity.md](./behavior-and-python-parity.md). Only **one** active runner stack (Python *or* Go) should process a given stream scope—not both at once.
 
 ## Deploy order

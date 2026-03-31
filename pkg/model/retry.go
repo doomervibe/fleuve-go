@@ -26,7 +26,16 @@ func (r RetryPolicy) CalculateDelay(retryCount int) time.Duration {
 	var delay time.Duration
 	switch r.BackoffStrategy {
 	case "exponential":
-		delay = time.Duration(float64(r.BackoffMin) * float64(uint64(1)<<uint(retryCount)))
+		shift := retryCount
+		if shift < 0 {
+			shift = 0
+		}
+		const maxShift = 62 // keep 1<<shift representable and conversion to float64 safe
+		if shift > maxShift {
+			shift = maxShift
+		}
+		mult := uint64(1) << uint(shift)
+		delay = time.Duration(float64(r.BackoffMin) * float64(mult))
 		if delay > r.BackoffMax {
 			delay = r.BackoffMax
 		}

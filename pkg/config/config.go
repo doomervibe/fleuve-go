@@ -59,9 +59,10 @@ func LoadFleuveToml(path string) (*Config, error) {
 		if candidate == "" {
 			continue
 		}
-		if _, err := os.Stat(candidate); err != nil {
+		if _, err := os.Stat(candidate); err != nil { // #nosec G703 G304 -- operator-controlled config path (CLI, env, cwd file)
 			continue
 		}
+		// #nosec G703 G304 -- operator-controlled config path (CLI, env, cwd file)
 		data, err := os.ReadFile(candidate)
 		if err != nil {
 			continue

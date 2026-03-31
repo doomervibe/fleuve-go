@@ -552,24 +552,38 @@ func (r *Repo) SearchWorkflows(ctx context.Context, attrs map[string]interface{}
 }
 
 func (r *Repo) RepublishEvents(ctx context.Context, workflowID string, minEventID, maxEventID *int64) (int, error) {
-	query := `UPDATE stored_events SET pushed = false WHERE 1=1`
-	args := []interface{}{}
-	argIdx := 1
+	const base = `UPDATE stored_events SET pushed = false WHERE 1=1`
+	wf := workflowID != ""
+	min := minEventID != nil
+	max := maxEventID != nil
 
-	if workflowID != "" {
-		query += fmt.Sprintf(" AND workflow_id = $%d", argIdx)
-		args = append(args, workflowID)
-		argIdx++
-	}
-	if minEventID != nil {
-		query += fmt.Sprintf(" AND global_id >= $%d", argIdx)
-		args = append(args, *minEventID)
-		argIdx++
-	}
-	if maxEventID != nil {
-		query += fmt.Sprintf(" AND global_id <= $%d", argIdx)
-		args = append(args, *maxEventID)
-		argIdx++
+	var query string
+	var args []interface{}
+
+	switch {
+	case wf && min && max:
+		query = base + ` AND workflow_id = $1 AND global_id >= $2 AND global_id <= $3`
+		args = []interface{}{workflowID, *minEventID, *maxEventID}
+	case wf && min && !max:
+		query = base + ` AND workflow_id = $1 AND global_id >= $2`
+		args = []interface{}{workflowID, *minEventID}
+	case wf && !min && max:
+		query = base + ` AND workflow_id = $1 AND global_id <= $2`
+		args = []interface{}{workflowID, *maxEventID}
+	case wf && !min && !max:
+		query = base + ` AND workflow_id = $1`
+		args = []interface{}{workflowID}
+	case !wf && min && max:
+		query = base + ` AND global_id >= $1 AND global_id <= $2`
+		args = []interface{}{*minEventID, *maxEventID}
+	case !wf && min && !max:
+		query = base + ` AND global_id >= $1`
+		args = []interface{}{*minEventID}
+	case !wf && !min && max:
+		query = base + ` AND global_id <= $1`
+		args = []interface{}{*maxEventID}
+	default:
+		query = base
 	}
 
 	result, err := r.db.ExecContext(ctx, query, args...)
