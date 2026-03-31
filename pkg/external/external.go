@@ -11,22 +11,19 @@ import (
 )
 
 type ExternalMessageConsumer struct {
-	natsClient         interface{}
-	streamName         string
-	consumerName       string
-	workflowType       string
-	workflowTypeClass  model.Workflow
-	repo               interface{}
-	sessionMaker       interface{}
-	dbExternalSubType  string
-	dbEventModel       string
-	dbWorkflowMetadata string
-	parsePayload       func([]byte) (model.Command, error)
-	wfIDRule           func(string) bool
-	running            bool
-	mu                 sync.Mutex
-	ctx                context.Context
-	cancel             context.CancelFunc
+	natsClient        interface{}
+	streamName        string
+	consumerName      string
+	workflowType      string
+	workflowTypeClass model.Workflow
+	repo              interface{}
+	sessionMaker      interface{}
+	parsePayload      func([]byte) (model.Command, error)
+	wfIDRule          func(string) bool
+	running           bool
+	mu                sync.Mutex
+	ctx               context.Context
+	cancel            context.CancelFunc
 }
 
 type ExternalMessageConsumerOption func(*ExternalMessageConsumer)
@@ -116,6 +113,15 @@ func (c *ExternalMessageConsumer) consumeLoop() {
 }
 
 func (c *ExternalMessageConsumer) pollMessages() {
+	// Stub: read configured deps so options stay live until NATS wiring lands.
+	_, _, _, _ = c.natsClient, c.repo, c.sessionMaker, c.consumerName
+	_ = c.streamName + c.workflowType
+	if c.workflowTypeClass != nil {
+		_, _ = c.workflowTypeClass.Name(), c.workflowTypeClass.SchemaVersion()
+	}
+	if c.wfIDRule != nil {
+		_ = c.wfIDRule("")
+	}
 }
 
 type ExternalMessage struct {
@@ -146,11 +152,8 @@ func (c *ExternalMessageConsumer) GetSubscribedTopics(ctx context.Context) ([]st
 }
 
 type OutboxPublisher struct {
-	natsClient   interface{}
-	streamName   string
 	batchSize    int
 	pollInterval time.Duration
-	db           interface{}
 	running      bool
 	ctx          context.Context
 	cancel       context.CancelFunc

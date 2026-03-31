@@ -124,7 +124,7 @@ func (s *TruncationService) truncateWorkflow(workflowID string, cutoff time.Time
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var snapshotVersion int64
 	err = tx.QueryRowContext(s.ctx, `

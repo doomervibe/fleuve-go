@@ -171,18 +171,15 @@ type SideEffects interface {
 }
 
 type WorkflowsRunner struct {
-	name                    string
-	workflowType            model.Workflow
-	repo                    Repository
-	stream                  stream.Reader
-	sideEffects             SideEffects
-	wfIDRule                func(string) bool
-	dbScalingOperationModel string
-	scalingCheckInterval    int
-	eventsProcessed         int64
-	targetOffsetForScaling  *int64
-	externalMessageConsumer interface{}
-	maxInflight             int
+	name                 string
+	workflowType         model.Workflow
+	repo                 Repository
+	stream               stream.Reader
+	sideEffects          SideEffects
+	wfIDRule             func(string) bool
+	scalingCheckInterval int
+	eventsProcessed      int64
+	maxInflight          int
 	tokenBucket             *TokenBucket
 	subscriptionCache       map[string][]*CachedSubscription
 	cacheInitialized        bool

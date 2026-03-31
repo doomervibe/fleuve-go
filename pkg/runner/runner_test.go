@@ -305,9 +305,7 @@ type BenchmarkRunner struct {
 	reader      *MockBenchmarkReader
 	batchSize   int
 	maxInflight int
-	tracker     *InflightTracker
 	processor   *MockEventProcessor
-	mu          sync.Mutex
 }
 
 func (r *BenchmarkRunner) ProcessBatch(ctx context.Context) error {

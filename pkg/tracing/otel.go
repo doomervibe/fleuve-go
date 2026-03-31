@@ -22,6 +22,7 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 const (
@@ -89,7 +90,7 @@ func OTelConfigFromFleuve(cfg *config.Config) OTelConfig {
 func NewOTelTracer(cfg OTelConfig) (*OTelTracer, error) {
 	if !cfg.Enabled {
 		return &OTelTracer{
-			tracer:      trace.NewNoopTracerProvider().Tracer("noop"),
+			tracer:      noop.NewTracerProvider().Tracer("noop"),
 			enabled:     false,
 			serviceName: cfg.ServiceName,
 		}, nil
@@ -194,7 +195,7 @@ func GetGlobalTracer() *OTelTracer {
 	if globalTracer == nil {
 		// Return noop tracer if not initialized
 		return &OTelTracer{
-			tracer:  trace.NewNoopTracerProvider().Tracer("noop"),
+			tracer:  noop.NewTracerProvider().Tracer("noop"),
 			enabled: false,
 		}
 	}

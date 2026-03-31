@@ -106,7 +106,7 @@ func RebalancePartitions(ctx context.Context, db *sql.DB, workflowType string, n
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var maxOffset int64
 	err = tx.QueryRowContext(ctx, `
@@ -147,7 +147,7 @@ func ScaleUpPartitions(ctx context.Context, db *sql.DB, workflowType string, new
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	maxOffset, err := GetMaxOffset(ctx, db, workflowType+"_runner")
 	if err != nil {
@@ -173,7 +173,7 @@ func ScaleDownPartitions(ctx context.Context, db *sql.DB, workflowType string, n
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	rows, err := tx.QueryContext(ctx, `
 		SELECT reader FROM offsets WHERE reader LIKE $1 || '%' ORDER BY reader

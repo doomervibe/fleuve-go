@@ -14,8 +14,9 @@ import (
 	"time"
 
 	"github.com/doomervibe/fleuve-go/pkg/delay"
-	"github.com/doomervibe/fleuve-go/pkg/postgres"
 	"github.com/doomervibe/fleuve-go/pkg/uiembed"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 )
 
 type SessionMaker interface {
@@ -34,15 +35,11 @@ type Row interface {
 }
 
 type FleuveUIBackend struct {
-	sessionMaker       SessionMaker
-	eventModel         *postgres.StoredEvent
-	activityModel      *postgres.Activity
-	delayScheduleModel *postgres.DelaySchedule
-	subscriptionModel  *postgres.Subscription
-	frontendDistPath   string
-	frontendFS         fs.FS
-	disableBundledUI   bool
-	uiTitle            string
+	sessionMaker     SessionMaker
+	frontendDistPath string
+	frontendFS       fs.FS
+	disableBundledUI bool
+	uiTitle          string
 }
 
 func NewFleuveUIBackend(
@@ -53,7 +50,7 @@ func NewFleuveUIBackend(
 	uiTitle := os.Getenv("FLEUVE_UI_TITLE")
 	if uiTitle == "" {
 		cwd, _ := os.Getwd()
-		uiTitle = strings.Title(strings.ReplaceAll(filepath.Base(cwd), "_", " "))
+		uiTitle = cases.Title(language.English).String(strings.ReplaceAll(filepath.Base(cwd), "_", " "))
 	}
 
 	b := &FleuveUIBackend{
@@ -357,7 +354,9 @@ func (b *FleuveUIBackend) listWorkflows(w http.ResponseWriter, r *http.Request) 
 			continue
 		}
 		if len(stateBytes) > 0 {
-			json.Unmarshal(stateBytes, &ws.State)
+			if err := json.Unmarshal(stateBytes, &ws.State); err != nil {
+				ws.State = nil
+			}
 		}
 		if ws.State == nil {
 			ws.State = map[string]interface{}{}
@@ -411,7 +410,9 @@ func (b *FleuveUIBackend) getWorkflow(w http.ResponseWriter, r *http.Request) {
 	}
 	wd.UpdatedAt = &updatedAt
 	if len(stateBytes) > 0 {
-		json.Unmarshal(stateBytes, &wd.State)
+		if err := json.Unmarshal(stateBytes, &wd.State); err != nil {
+			wd.State = nil
+		}
 	}
 	if wd.State == nil {
 		wd.State = map[string]interface{}{}
@@ -462,10 +463,14 @@ func (b *FleuveUIBackend) getWorkflowEvents(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		if len(bodyBytes) > 0 {
-			json.Unmarshal(bodyBytes, &er.Body)
+			if err := json.Unmarshal(bodyBytes, &er.Body); err != nil {
+				er.Body = nil
+			}
 		}
 		if len(metaBytes) > 0 {
-			json.Unmarshal(metaBytes, &er.Metadata)
+			if err := json.Unmarshal(metaBytes, &er.Metadata); err != nil {
+				er.Metadata = nil
+			}
 		}
 		if er.Body == nil {
 			er.Body = map[string]interface{}{}
@@ -519,7 +524,9 @@ func (b *FleuveUIBackend) getWorkflowStateAtVersion(w http.ResponseWriter, r *ht
 			continue
 		}
 		if len(bodyBytes) > 0 {
-			json.Unmarshal(bodyBytes, &ei.Body)
+			if err := json.Unmarshal(bodyBytes, &ei.Body); err != nil {
+				ei.Body = nil
+			}
 		}
 		if ei.Body == nil {
 			ei.Body = map[string]interface{}{}
@@ -591,7 +598,9 @@ func (b *FleuveUIBackend) getWorkflowStateDiff(w http.ResponseWriter, r *http.Re
 				continue
 			}
 			if len(bodyBytes) > 0 {
-				json.Unmarshal(bodyBytes, &ei.Body)
+				if err := json.Unmarshal(bodyBytes, &ei.Body); err != nil {
+					ei.Body = nil
+				}
 			}
 			if ei.Body == nil {
 				ei.Body = map[string]interface{}{}
@@ -697,10 +706,14 @@ func (b *FleuveUIBackend) listEvents(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if len(bodyBytes) > 0 {
-			json.Unmarshal(bodyBytes, &er.Body)
+			if err := json.Unmarshal(bodyBytes, &er.Body); err != nil {
+				er.Body = nil
+			}
 		}
 		if len(metaBytes) > 0 {
-			json.Unmarshal(metaBytes, &er.Metadata)
+			if err := json.Unmarshal(metaBytes, &er.Metadata); err != nil {
+				er.Metadata = nil
+			}
 		}
 		if er.Body == nil {
 			er.Body = map[string]interface{}{}
@@ -743,10 +756,14 @@ func (b *FleuveUIBackend) getEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(bodyBytes) > 0 {
-		json.Unmarshal(bodyBytes, &er.Body)
+		if err := json.Unmarshal(bodyBytes, &er.Body); err != nil {
+			er.Body = nil
+		}
 	}
 	if len(metaBytes) > 0 {
-		json.Unmarshal(metaBytes, &er.Metadata)
+		if err := json.Unmarshal(metaBytes, &er.Metadata); err != nil {
+			er.Metadata = nil
+		}
 	}
 	if er.Body == nil {
 		er.Body = map[string]interface{}{}
@@ -849,7 +866,9 @@ func (b *FleuveUIBackend) listActivitiesWithFilter(w http.ResponseWriter, r *htt
 			continue
 		}
 		if len(checkpointBytes) > 0 {
-			json.Unmarshal(checkpointBytes, &ar.Checkpoint)
+			if err := json.Unmarshal(checkpointBytes, &ar.Checkpoint); err != nil {
+				ar.Checkpoint = nil
+			}
 		}
 		if ar.Checkpoint == nil {
 			ar.Checkpoint = map[string]interface{}{}
@@ -942,7 +961,9 @@ func (b *FleuveUIBackend) listDelaysWithFilter(w http.ResponseWriter, r *http.Re
 			continue
 		}
 		if len(nextCmdBytes) > 0 {
-			json.Unmarshal(nextCmdBytes, &dr.NextCommand)
+			if err := json.Unmarshal(nextCmdBytes, &dr.NextCommand); err != nil {
+				dr.NextCommand = nil
+			}
 		}
 		if dr.NextCommand == nil {
 			dr.NextCommand = map[string]interface{}{}
@@ -993,51 +1014,67 @@ func (b *FleuveUIBackend) getStats(w http.ResponseWriter, r *http.Request) {
 		ActivitiesByStatus: make(map[string]int),
 	}
 
-	row, _ := sess.QueryRow(ctx, `SELECT COUNT(DISTINCT workflow_id) FROM stored_events`)
-	row.Scan(&stats.TotalWorkflows)
-
-	row, _ = sess.QueryRow(ctx, `SELECT COUNT(*) FROM stored_events`)
-	row.Scan(&stats.TotalEvents)
-
-	row, _ = sess.QueryRow(ctx, `SELECT COUNT(*) FROM activities`)
-	row.Scan(&stats.TotalActivities)
-
-	row, _ = sess.QueryRow(ctx, `SELECT COUNT(*) FROM activities WHERE status = 'pending'`)
-	row.Scan(&stats.PendingActivities)
-
-	row, _ = sess.QueryRow(ctx, `SELECT COUNT(*) FROM activities WHERE status = 'failed'`)
-	row.Scan(&stats.FailedActivities)
-
-	row, _ = sess.QueryRow(ctx, `SELECT COUNT(*) FROM delay_schedules`)
-	row.Scan(&stats.TotalDelays)
-
-	row, _ = sess.QueryRow(ctx, `SELECT COUNT(*) FROM delay_schedules WHERE delay_until > NOW()`)
-	row.Scan(&stats.ActiveDelays)
-
-	rows, _ := sess.Query(ctx, `SELECT workflow_type, COUNT(DISTINCT workflow_id) FROM stored_events GROUP BY workflow_type`)
-	for _, row := range rows {
-		var wt string
-		var count int
-		if row.Scan(&wt, &count) == nil {
-			stats.WorkflowsByType[wt] = count
+	if row, qerr := sess.QueryRow(ctx, `SELECT COUNT(DISTINCT workflow_id) FROM stored_events`); qerr == nil && row != nil {
+		if err := row.Scan(&stats.TotalWorkflows); err != nil {
+			stats.TotalWorkflows = 0
+		}
+	}
+	if row, qerr := sess.QueryRow(ctx, `SELECT COUNT(*) FROM stored_events`); qerr == nil && row != nil {
+		if err := row.Scan(&stats.TotalEvents); err != nil {
+			stats.TotalEvents = 0
+		}
+	}
+	if row, qerr := sess.QueryRow(ctx, `SELECT COUNT(*) FROM activities`); qerr == nil && row != nil {
+		if err := row.Scan(&stats.TotalActivities); err != nil {
+			stats.TotalActivities = 0
+		}
+	}
+	if row, qerr := sess.QueryRow(ctx, `SELECT COUNT(*) FROM activities WHERE status = 'pending'`); qerr == nil && row != nil {
+		if err := row.Scan(&stats.PendingActivities); err != nil {
+			stats.PendingActivities = 0
+		}
+	}
+	if row, qerr := sess.QueryRow(ctx, `SELECT COUNT(*) FROM activities WHERE status = 'failed'`); qerr == nil && row != nil {
+		if err := row.Scan(&stats.FailedActivities); err != nil {
+			stats.FailedActivities = 0
+		}
+	}
+	if row, qerr := sess.QueryRow(ctx, `SELECT COUNT(*) FROM delay_schedules`); qerr == nil && row != nil {
+		if err := row.Scan(&stats.TotalDelays); err != nil {
+			stats.TotalDelays = 0
+		}
+	}
+	if row, qerr := sess.QueryRow(ctx, `SELECT COUNT(*) FROM delay_schedules WHERE delay_until > NOW()`); qerr == nil && row != nil {
+		if err := row.Scan(&stats.ActiveDelays); err != nil {
+			stats.ActiveDelays = 0
 		}
 	}
 
-	rows, _ = sess.Query(ctx, `SELECT event_type, COUNT(*) FROM stored_events GROUP BY event_type`)
-	for _, row := range rows {
-		var et string
-		var count int
-		if row.Scan(&et, &count) == nil {
-			stats.EventsByType[et] = count
+	if rows, qerr := sess.Query(ctx, `SELECT workflow_type, COUNT(DISTINCT workflow_id) FROM stored_events GROUP BY workflow_type`); qerr == nil {
+		for _, row := range rows {
+			var wt string
+			var count int
+			if err := row.Scan(&wt, &count); err == nil {
+				stats.WorkflowsByType[wt] = count
+			}
 		}
 	}
-
-	rows, _ = sess.Query(ctx, `SELECT status, COUNT(*) FROM activities GROUP BY status`)
-	for _, row := range rows {
-		var st string
-		var count int
-		if row.Scan(&st, &count) == nil {
-			stats.ActivitiesByStatus[st] = count
+	if rows, qerr := sess.Query(ctx, `SELECT event_type, COUNT(*) FROM stored_events GROUP BY event_type`); qerr == nil {
+		for _, row := range rows {
+			var et string
+			var count int
+			if err := row.Scan(&et, &count); err == nil {
+				stats.EventsByType[et] = count
+			}
+		}
+	}
+	if rows, qerr := sess.Query(ctx, `SELECT status, COUNT(*) FROM activities GROUP BY status`); qerr == nil {
+		for _, row := range rows {
+			var st string
+			var count int
+			if err := row.Scan(&st, &count); err == nil {
+				stats.ActivitiesByStatus[st] = count
+			}
 		}
 	}
 

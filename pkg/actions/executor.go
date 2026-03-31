@@ -30,8 +30,6 @@ type OnActionFailed func(workflowID string, eventNumber int64, err error)
 type ActionExecutor struct {
 	adapter                   model.Adapter
 	repo                      Repository
-	dbActivityModel           string
-	dbEventModel              string
 	maxRetries                int
 	recoveryInterval          time.Duration
 	actionTimeout             time.Duration
@@ -209,12 +207,8 @@ func (e *ActionExecutor) runActionWithRetry(ctx context.Context, event *model.Co
 					}
 				}
 			} else if y.IsTimeout() {
-				t := y.GetTimeout()
-				if t != nil {
-					timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(t.Seconds*float64(time.Second)))
-					_ = timeoutCtx
-					defer cancel()
-				}
+				// Timeout yield is reserved for scoping follow-up work; avoid defer inside the range loop (SA9001).
+				_ = y.GetTimeout()
 			}
 		}
 
@@ -242,7 +236,7 @@ func (e *ActionExecutor) CancelWorkflowActions(workflowID string, eventNumbers [
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if eventNumbers == nil || len(eventNumbers) == 0 {
+	if len(eventNumbers) == 0 {
 		if cancels, ok := e.runningActions[workflowID]; ok {
 			for _, cancel := range cancels {
 				cancel()

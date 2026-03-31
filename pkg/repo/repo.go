@@ -19,20 +19,16 @@ type SyncDBHandler func(ctx context.Context, tx *sql.Tx, workflowID string, oldS
 
 // Repo is the database/sql-backed workflow repository (distinct from PGXRepo).
 type Repo struct {
-	db                   *sql.DB
-	workflowType         string
-	workflow             model.Workflow
-	es                   EphemeralStorage
-	dbSubModel           string
-	dbWorkflowMetadata   string
-	dbExternalSubModel   string
-	syncDBHandler        SyncDBHandler
-	adapter              model.Adapter
-	dbSnapshotModel      string
-	snapshotInterval     int
-	dbDelayScheduleModel string
-	dbSearchAttributes   string
-	namespace            *string
+	db                 *sql.DB
+	workflowType       string
+	workflow           model.Workflow
+	es                 EphemeralStorage
+	dbWorkflowMetadata string
+	syncDBHandler      SyncDBHandler
+	dbSnapshotModel    string
+	snapshotInterval   int
+	dbSearchAttributes string
+	namespace          *string
 }
 
 type RepoOption func(*Repo)
@@ -86,7 +82,7 @@ func (r *Repo) CreateNew(ctx context.Context, cmd model.Command, id string, tags
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	for i, e := range events {
 		if len(tags) > 0 {

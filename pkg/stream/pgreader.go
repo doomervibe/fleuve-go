@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"sync"
 	"time"
@@ -63,12 +64,16 @@ func (r *PGReader) IterEvents(ctx context.Context) <-chan *ConsumedEvent {
 
 			events, err := r.readBatch(ctx)
 			if err != nil {
-				sleeper.Sleep(ctx)
+				if serr := sleeper.Sleep(ctx); serr != nil && !errors.Is(serr, context.Canceled) {
+					log.Printf("pgreader sleep: %v", serr)
+				}
 				continue
 			}
 
 			if len(events) == 0 {
-				sleeper.Sleep(ctx)
+				if serr := sleeper.Sleep(ctx); serr != nil && !errors.Is(serr, context.Canceled) {
+					log.Printf("pgreader sleep: %v", serr)
+				}
 				continue
 			}
 
@@ -131,12 +136,16 @@ func (r *PGReader) readBatch(ctx context.Context) ([]*ConsumedEvent, error) {
 
 		var raw map[string]interface{}
 		if len(bodyBytes) > 0 {
-			json.Unmarshal(bodyBytes, &raw)
+			if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+				raw = nil
+			}
 		}
 		ev.Event = &genericEvent{raw: raw}
 
 		if len(metaBytes) > 0 {
-			json.Unmarshal(metaBytes, &ev.Metadata)
+			if err := json.Unmarshal(metaBytes, &ev.Metadata); err != nil {
+				ev.Metadata = nil
+			}
 		}
 		if ev.Metadata == nil {
 			ev.Metadata = make(map[string]any)

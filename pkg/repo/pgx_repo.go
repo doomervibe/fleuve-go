@@ -108,7 +108,7 @@ func (r *PGXRepo) CreateNew(ctx context.Context, cmd model.Command, id string, t
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var jetRows []jetStreamCommittedRow
 	for i, e := range events {

@@ -34,7 +34,6 @@ type FleuveMetrics struct {
 
 	// Registry
 	registry *prometheus.Registry
-	mu       sync.Mutex
 }
 
 var (
