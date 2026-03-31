@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/doomervibe/fleuve-go/pkg/model"
@@ -121,9 +122,9 @@ func JSONToRetryPolicy(b []byte) (model.RetryPolicy, error) {
 }
 
 func jsonMarshal(v interface{}) ([]byte, error) {
-	return []byte{}, nil
+	return json.Marshal(v)
 }
 
 func jsonUnmarshal(data []byte, v interface{}) error {
-	return nil
+	return json.Unmarshal(data, v)
 }

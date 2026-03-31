@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"time"
 
@@ -77,17 +78,22 @@ func NewPGXRepo(pool *pgxpool.Pool, workflowType string, workflow model.Workflow
 	return r
 }
 
-func (r *PGXRepo) flushJetStreamAfterCommit(workflowID string, rows []jetStreamCommittedRow) {
+func (r *PGXRepo) flushJetStreamAfterCommit(workflowID string, rows []jetStreamCommittedRow) error {
 	if r.jetStream == nil || len(rows) == 0 {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	var firstErr error
 	for _, row := range rows {
 		if err := r.jetStream.PublishWorkflowCommittedEvent(ctx, row.globalID, workflowID, r.workflowType, row.eventNo, row.eventType, row.body, row.meta, row.at); err != nil {
 			log.Printf("jetstream publish global_id=%d workflow=%s: %v", row.globalID, workflowID, err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
+	return firstErr
 }
 
 func (r *PGXRepo) CreateNew(ctx context.Context, cmd model.Command, id string, tags []string) (*model.StoredState, error) {
@@ -115,8 +121,14 @@ func (r *PGXRepo) CreateNew(ctx context.Context, cmd model.Command, id string, t
 		if len(tags) > 0 {
 			mergeWorkflowTagsIntoMetadata(e, tags)
 		}
-		bodyBytes, _ := json.Marshal(e)
-		metaBytes, _ := json.Marshal(e.GetMetadata())
+		bodyBytes, err := json.Marshal(e)
+		if err != nil {
+			return nil, fmt.Errorf("marshal event body: %w", err)
+		}
+		metaBytes, err := json.Marshal(e.GetMetadata())
+		if err != nil {
+			return nil, fmt.Errorf("marshal event metadata: %w", err)
+		}
 		at := time.Now()
 
 		var gid int64
@@ -230,8 +242,16 @@ func (r *PGXRepo) ProcessCommand(ctx context.Context, id string, cmd model.Comma
 		var jetRows []jetStreamCommittedRow
 		for i, e := range events {
 			mergeWorkflowTagsIntoMetadata(e, wfTags)
-			bodyBytes, _ := json.Marshal(e)
-			metaBytes, _ := json.Marshal(e.GetMetadata())
+			bodyBytes, err := json.Marshal(e)
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				return nil, nil, &model.Rejection{Msg: fmt.Sprintf("marshal event body: %v", err)}
+			}
+			metaBytes, err := json.Marshal(e.GetMetadata())
+			if err != nil {
+				_ = tx.Rollback(ctx)
+				return nil, nil, &model.Rejection{Msg: fmt.Sprintf("marshal event metadata: %v", err)}
+			}
 			nextVer := state.Version + int64(i) + 1
 			at := time.Now()
 			var gid int64
@@ -298,8 +318,14 @@ func (r *PGXRepo) PauseWorkflow(ctx context.Context, id string, reason string) (
 	}
 
 	ev := &model.EvSystemPause{Reason: reason}
-	bodyBytes, _ := json.Marshal(ev)
-	metaBytes, _ := json.Marshal(ev.GetMetadata())
+	bodyBytes, err := json.Marshal(ev)
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("marshal pause event: %v", err)}
+	}
+	metaBytes, err := json.Marshal(ev.GetMetadata())
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("marshal pause metadata: %v", err)}
+	}
 	at := time.Now()
 	var gid int64
 	var storedAt time.Time
@@ -334,8 +360,14 @@ func (r *PGXRepo) ResumeWorkflow(ctx context.Context, id string) (*model.StoredS
 	}
 
 	ev := &model.EvSystemResume{}
-	bodyBytes, _ := json.Marshal(ev)
-	metaBytes, _ := json.Marshal(ev.GetMetadata())
+	bodyBytes, err := json.Marshal(ev)
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("marshal resume event: %v", err)}
+	}
+	metaBytes, err := json.Marshal(ev.GetMetadata())
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("marshal resume metadata: %v", err)}
+	}
 	at := time.Now()
 	var gid int64
 	var storedAt time.Time
@@ -376,8 +408,14 @@ func (r *PGXRepo) CancelWorkflow(ctx context.Context, id string, reason string, 
 	_, _ = r.pool.Exec(ctx, `DELETE FROM delay_schedules WHERE workflow_id = $1`, id)
 
 	ev := &model.EvSystemCancel{Reason: reason}
-	bodyBytes, _ := json.Marshal(ev)
-	metaBytes, _ := json.Marshal(ev.GetMetadata())
+	bodyBytes, err := json.Marshal(ev)
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("marshal cancel event: %v", err)}
+	}
+	metaBytes, err := json.Marshal(ev.GetMetadata())
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("marshal cancel metadata: %v", err)}
+	}
 	at := time.Now()
 	var gid int64
 	var storedAt time.Time
@@ -472,16 +510,23 @@ func (r *PGXRepo) replayPgxRows(rows pgx.Rows, workflowID string) (*model.Stored
 		var schemaVersion int
 		var eventType string
 		if err := rows.Scan(&bodyBytes, &version, &schemaVersion, &eventType); err != nil {
+			log.Printf("replay scan workflow=%s version=%d: %v", workflowID, lastVersion+1, err)
 			continue
 		}
 		lastVersion = version
 
 		var raw map[string]any
 		if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+			log.Printf("replay unmarshal workflow=%s version=%d type=%s: %v", workflowID, version, eventType, err)
 			continue
 		}
 		ev, err := model.DecodeReplayEvent(r.workflow, eventType, schemaVersion, raw)
-		if err != nil || ev == nil {
+		if err != nil {
+			log.Printf("replay decode workflow=%s version=%d type=%s: %v", workflowID, version, eventType, err)
+			continue
+		}
+		if ev == nil {
+			log.Printf("replay decode returned nil workflow=%s version=%d type=%s", workflowID, version, eventType)
 			continue
 		}
 		events = append(events, ev)
@@ -544,12 +589,15 @@ func (r *PGXRepo) GetWorkflowTags(ctx context.Context, workflowID string) ([]str
 }
 
 func (r *PGXRepo) CreateDelay(ctx context.Context, workflowID, delayID string, delayUntil time.Time, eventVersion int64, nextCmd model.Command, cronExpr, tz string) error {
-	nextCmdBytes, _ := json.Marshal(nextCmd)
+	nextCmdBytes, err := json.Marshal(nextCmd)
+	if err != nil {
+		return fmt.Errorf("marshal delay command: %w", err)
+	}
 
-	_, err := r.pool.Exec(ctx, `
+	_, err = r.pool.Exec(ctx, `
 		INSERT INTO delay_schedules (workflow_id, delay_id, workflow_type, delay_until, event_version, cron_expression, timezone, next_command, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (workflow_id, delay_id) DO UPDATE SET 
+		ON CONFLICT (workflow_id, delay_id) DO UPDATE SET
 			delay_until = EXCLUDED.delay_until,
 			next_command = EXCLUDED.next_command
 	`, workflowID, delayID, r.workflowType, delayUntil, eventVersion, cronExpr, tz, nextCmdBytes, time.Now())
@@ -587,8 +635,11 @@ func (r *PGXRepo) GetPendingDelays(ctx context.Context, limit int) ([]*postgres.
 }
 
 func (r *PGXRepo) SaveSnapshot(ctx context.Context, workflowID string, version int64, state model.State) error {
-	stateBytes, _ := json.Marshal(state)
-	_, err := r.pool.Exec(ctx, `
+	stateBytes, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal snapshot state: %w", err)
+	}
+	_, err = r.pool.Exec(ctx, `
 		INSERT INTO snapshots (workflow_id, workflow_type, version, state, created_at)
 		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (workflow_id) DO UPDATE SET version = EXCLUDED.version, state = EXCLUDED.state, created_at = EXCLUDED.created_at

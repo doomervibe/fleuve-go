@@ -63,6 +63,55 @@ func TestInProcessEphemeralStorageUpdateExistingNoExtraKey(t *testing.T) {
 	}
 }
 
+func TestInProcessEphemeralStorageRingBufferEviction(t *testing.T) {
+	ctx := context.Background()
+	s := NewInProcessEphemeralStorage(3)
+	// Fill the ring
+	for i := 0; i < 3; i++ {
+		_ = s.PutState(ctx, &model.StoredState{ID: string(rune('a' + i)), Version: 1})
+	}
+	// Remove middle entry
+	_ = s.RemoveState(ctx, "b")
+	// Add two more — should evict 'a', then skip empty 'b' slot
+	_ = s.PutState(ctx, &model.StoredState{ID: "d", Version: 1})
+	_ = s.PutState(ctx, &model.StoredState{ID: "e", Version: 1})
+	// 'a' should be evicted
+	if got, _ := s.GetState(ctx, "a"); got != nil {
+		t.Fatal("'a' should have been evicted")
+	}
+	// 'c', 'd', 'e' should be present (b was already removed)
+	for _, id := range []string{"c", "d", "e"} {
+		if got, _ := s.GetState(ctx, id); got == nil {
+			t.Fatalf("expected %q to be present", id)
+		}
+	}
+}
+
+func TestInProcessEphemeralStorageEvictionOrderWraps(t *testing.T) {
+	ctx := context.Background()
+	s := NewInProcessEphemeralStorage(2)
+	// a, b fill the cache
+	_ = s.PutState(ctx, &model.StoredState{ID: "a", Version: 1})
+	_ = s.PutState(ctx, &model.StoredState{ID: "b", Version: 1})
+	// c evicts a
+	_ = s.PutState(ctx, &model.StoredState{ID: "c", Version: 1})
+	if got, _ := s.GetState(ctx, "a"); got != nil {
+		t.Fatal("a should be evicted")
+	}
+	// d evicts b
+	_ = s.PutState(ctx, &model.StoredState{ID: "d", Version: 1})
+	if got, _ := s.GetState(ctx, "b"); got != nil {
+		t.Fatal("b should be evicted")
+	}
+	// c and d survive
+	if got, _ := s.GetState(ctx, "c"); got == nil {
+		t.Fatal("c should remain")
+	}
+	if got, _ := s.GetState(ctx, "d"); got == nil {
+		t.Fatal("d should remain")
+	}
+}
+
 type mapStorage struct {
 	mu   sync.Mutex
 	data map[string]*model.StoredState

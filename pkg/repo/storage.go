@@ -16,14 +16,16 @@ type EphemeralStorage interface {
 type InProcessEphemeralStorage struct {
 	mu      sync.RWMutex
 	cache   map[string]*model.StoredState
-	keys    []string
+	ring    []string // ring buffer for eviction order
+	head    int      // next write position
+	size    int      // current number of entries in ring
 	maxSize int
 }
 
 func NewInProcessEphemeralStorage(maxSize int) *InProcessEphemeralStorage {
 	return &InProcessEphemeralStorage{
 		cache:   make(map[string]*model.StoredState),
-		keys:    make([]string, 0),
+		ring:    make([]string, maxSize),
 		maxSize: maxSize,
 	}
 }
@@ -33,12 +35,18 @@ func (s *InProcessEphemeralStorage) PutState(ctx context.Context, new *model.Sto
 	defer s.mu.Unlock()
 
 	if _, exists := s.cache[new.ID]; !exists {
-		if len(s.keys) >= s.maxSize {
-			oldest := s.keys[0]
-			delete(s.cache, oldest)
-			s.keys = s.keys[1:]
+		if s.size >= s.maxSize {
+			// Evict the oldest entry at the current head (ring wraps around).
+			// Skip slots that were already removed.
+			oldest := s.ring[s.head]
+			if oldest != "" {
+				delete(s.cache, oldest)
+			}
+		} else {
+			s.size++
 		}
-		s.keys = append(s.keys, new.ID)
+		s.ring[s.head] = new.ID
+		s.head = (s.head + 1) % s.maxSize
 	}
 	s.cache[new.ID] = new
 	return nil
@@ -60,9 +68,11 @@ func (s *InProcessEphemeralStorage) RemoveState(ctx context.Context, workflowID 
 	defer s.mu.Unlock()
 
 	delete(s.cache, workflowID)
-	for i, k := range s.keys {
-		if k == workflowID {
-			s.keys = append(s.keys[:i], s.keys[i+1:]...)
+	// Mark the slot as empty in the ring; eviction will skip empty/stale entries.
+	for i := 0; i < s.size; i++ {
+		idx := (s.head - s.size + i + s.maxSize) % s.maxSize
+		if s.ring[idx] == workflowID {
+			s.ring[idx] = ""
 			break
 		}
 	}

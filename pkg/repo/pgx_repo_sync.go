@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -53,8 +54,11 @@ func (r *PGXRepo) handleSyncEventPgx(ctx context.Context, tx pgx.Tx, workflowID 
 		_, err := tx.Exec(ctx, `DELETE FROM external_subscriptions WHERE workflow_id = $1 AND topic = $2`, workflowID, ev.Topic)
 		return err
 	case *model.EvDelay:
-		nextCmdBytes, _ := json.Marshal(ev.NextCmd)
-		_, err := tx.Exec(ctx, `
+		nextCmdBytes, err := json.Marshal(ev.NextCmd)
+		if err != nil {
+			return fmt.Errorf("marshal delay command: %w", err)
+		}
+		_, err = tx.Exec(ctx, `
 			INSERT INTO delay_schedules (workflow_id, delay_id, workflow_type, delay_until, event_version, cron_expression, timezone, next_command, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (workflow_id, delay_id) DO UPDATE SET
@@ -67,12 +71,15 @@ func (r *PGXRepo) handleSyncEventPgx(ctx context.Context, tx pgx.Tx, workflowID 
 		return err
 	case *model.EvScheduleAdded:
 		sch := ev.Schedule
-		nextCmdBytes, _ := json.Marshal(sch.NextCmd)
+		nextCmdBytes, err := json.Marshal(sch.NextCmd)
+		if err != nil {
+			return fmt.Errorf("marshal schedule command: %w", err)
+		}
 		delayUntil := time.Now()
 		if next := delay.NextCronFire(sch.CronExpression, sch.Timezone); next != nil {
 			delayUntil = *next
 		}
-		_, err := tx.Exec(ctx, `
+		_, err = tx.Exec(ctx, `
 			INSERT INTO delay_schedules (workflow_id, delay_id, workflow_type, delay_until, event_version, cron_expression, timezone, next_command, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (workflow_id, delay_id) DO UPDATE SET

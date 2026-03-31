@@ -189,13 +189,17 @@ func (r *PGReader) SetStopAtOffset(offset int64) {
 func (r *PGReader) SetCommittedOffset(offset int64) {
 	r.mu.Lock()
 	r.committedOffset = offset
+	// Capture values under lock so the DB persist uses the same offset that was committed.
+	reader := r.readerName
 	r.mu.Unlock()
 
-	if _, err := r.db.ExecContext(context.Background(), `
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := r.db.ExecContext(ctx, `
         INSERT INTO offsets (reader, last_read_event_no) VALUES ($1, $2)
         ON CONFLICT (reader) DO UPDATE SET last_read_event_no = EXCLUDED.last_read_event_no
-    `, r.readerName, offset); err != nil {
-		log.Printf("pgreader offset persist (%s): %v", r.readerName, err)
+    `, reader, offset); err != nil {
+		log.Printf("pgreader offset persist (%s): %v", reader, err)
 	}
 }
 

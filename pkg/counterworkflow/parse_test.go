@@ -28,3 +28,37 @@ func TestParseGatewayCommand(t *testing.T) {
 func TestWorkflowImplementsModel(t *testing.T) {
 	var _ model.Workflow = New()
 }
+
+func TestCounterIncrementedMetadataNotNil(t *testing.T) {
+	e := &CounterIncremented{Amount: 1}
+	m := e.GetMetadata()
+	if m == nil {
+		t.Fatal("GetMetadata() returned nil, want non-nil map")
+	}
+	// Writing to the map should not panic.
+	m["key"] = "value"
+	if e.GetMetadata()["key"] != "value" {
+		t.Fatal("metadata not persisted")
+	}
+}
+
+func TestCounterResetMetadataNotNil(t *testing.T) {
+	e := &CounterReset{}
+	m := e.GetMetadata()
+	if m == nil {
+		t.Fatal("GetMetadata() returned nil, want non-nil map")
+	}
+	m["key"] = "value"
+	if e.GetMetadata()["key"] != "value" {
+		t.Fatal("metadata not persisted")
+	}
+}
+
+func TestCounterEventSetMetadata(t *testing.T) {
+	e := &CounterIncremented{Amount: 5}
+	custom := map[string]any{"workflow_tags": []string{"vip"}}
+	e.SetMetadata(custom)
+	if e.GetMetadata()["workflow_tags"] == nil {
+		t.Fatal("SetMetadata not applied")
+	}
+}

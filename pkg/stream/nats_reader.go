@@ -257,27 +257,50 @@ func (r *NATSReader) SetCommittedOffset(offset int64) {
 		return
 	}
 	target := uint64(offset) // #nosec G115 -- offset validated non-negative
+
+	// Collect messages to ack under lock, then ack outside to avoid holding
+	// the mutex during network I/O.
 	r.mu.Lock()
 	r.committedSeq = target
+	var toAck []struct {
+		seq uint64
+		msg jetstream.Msg
+	}
 	for r.lastJSAcked < target {
 		next := r.lastJSAcked + 1
 		msg, ok := r.pendingAcks[next]
 		if !ok {
 			break
 		}
-		if err := msg.Ack(); err != nil {
-			log.Printf("NATS ack seq %d: %v", next, err)
-			break
-		}
+		toAck = append(toAck, struct {
+			seq uint64
+			msg jetstream.Msg
+		}{next, msg})
 		delete(r.pendingAcks, next)
 		r.lastJSAcked = next
 	}
-	persisted := jetStreamAckedToPersistedOffset(r.lastJSAcked)
+	lastAcked := r.lastJSAcked
 	pool := r.offsetPool
 	key := r.offsetReader
 	r.mu.Unlock()
 
+	// Ack messages outside the lock.
+	for _, item := range toAck {
+		if err := item.msg.Ack(); err != nil {
+			log.Printf("NATS ack seq %d: %v", item.seq, err)
+			// Re-insert failed acks so they can be retried.
+			r.mu.Lock()
+			r.pendingAcks[item.seq] = item.msg
+			if item.seq <= r.lastJSAcked {
+				r.lastJSAcked = item.seq - 1
+			}
+			r.mu.Unlock()
+			break
+		}
+	}
+
 	// Persist only JetStream-acked sequences so restarts do not skip messages still pending ack.
+	persisted := jetStreamAckedToPersistedOffset(lastAcked)
 	if pool != nil && key != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

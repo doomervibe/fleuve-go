@@ -376,6 +376,11 @@ func (r *WorkflowsRunner) processEvent(ctx context.Context, event *stream.Consum
 
 	workflowIDs := r.workflowsToNotify(event)
 	for _, wfID := range workflowIDs {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
 		_, _, rej := r.repo.ProcessCommand(ctx, wfID, cmd)
 		if rej != nil {
 			slog.Error("process_command_rejected", "target_workflow_id", wfID, "source_workflow_id", event.WorkflowID, "msg", rej.Msg)

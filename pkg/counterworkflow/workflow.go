@@ -26,19 +26,32 @@ func (s *CounterState) Copy() model.State {
 
 // CounterIncremented is emitted when the counter increases.
 type CounterIncremented struct {
-	Amount int64 `json:"amount"`
+	Amount   int64          `json:"amount"`
+	Metadata map[string]any `json:"-"`
 }
 
-func (e *CounterIncremented) GetType() string              { return "counter_incremented" }
-func (e *CounterIncremented) GetMetadata() map[string]any  { return nil }
-func (e *CounterIncremented) SetMetadata(m map[string]any) {}
+func (e *CounterIncremented) GetType() string { return "counter_incremented" }
+func (e *CounterIncremented) GetMetadata() map[string]any {
+	if e.Metadata == nil {
+		e.Metadata = make(map[string]any)
+	}
+	return e.Metadata
+}
+func (e *CounterIncremented) SetMetadata(m map[string]any) { e.Metadata = m }
 
 // CounterReset clears the counter.
-type CounterReset struct{}
+type CounterReset struct {
+	Metadata map[string]any `json:"-"`
+}
 
-func (e *CounterReset) GetType() string              { return "counter_reset" }
-func (e *CounterReset) GetMetadata() map[string]any  { return nil }
-func (e *CounterReset) SetMetadata(m map[string]any) {}
+func (e *CounterReset) GetType() string { return "counter_reset" }
+func (e *CounterReset) GetMetadata() map[string]any {
+	if e.Metadata == nil {
+		e.Metadata = make(map[string]any)
+	}
+	return e.Metadata
+}
+func (e *CounterReset) SetMetadata(m map[string]any) { e.Metadata = m }
 
 // IncrementCmd adds to the counter.
 type IncrementCmd struct {

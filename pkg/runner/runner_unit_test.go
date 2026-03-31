@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -246,6 +247,37 @@ func TestWorkflowsToNotifyWFIDRuleFilters(t *testing.T) {
 
 // delay_complete on the runner's workflow type maps the event's workflow_id into
 // workflowsToNotify (see runner.go); subscription-based routing is covered separately.
+func TestProcessEventRespectsContextCancellation(t *testing.T) {
+	repo := &countingRepo{}
+	wf := &relayWorkflow{}
+	r := NewWorkflowsRunner(wf, repo, &sliceStreamReader{}, noopSideEffects{})
+	// Set up many subscriptions so the loop has work to do
+	cache := make(map[string][]*CachedSubscription)
+	for i := 0; i < 100; i++ {
+		id := fmt.Sprintf("listener-%d", i)
+		cache[id] = []*CachedSubscription{{
+			SubscribedToWorkflow:  "*",
+			SubscribedToEventType: "ping",
+		}}
+	}
+	r.subscriptionCache = cache
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	ev := &stream.ConsumedEvent{
+		WorkflowID:   "src",
+		WorkflowType: "foreign",
+		EventType:    "ping",
+		Event:        &pingEvent{},
+	}
+	r.processEvent(ctx, ev)
+	// With a cancelled context, we should process zero or very few commands
+	if repo.processCount() > 1 {
+		t.Fatalf("expected at most 1 ProcessCommand call with cancelled ctx, got %d", repo.processCount())
+	}
+}
+
 func TestWorkflowsRunnerProcessEventDispatchesCommand(t *testing.T) {
 	repo := &countingRepo{}
 	reader := &sliceStreamReader{
