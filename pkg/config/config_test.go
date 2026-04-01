@@ -1,11 +1,25 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"testing"
 )
 
+// isolateFleuveEnv clears FLEUVE_* override variables so tests are not affected
+// by the host environment (e.g. CI FLEUVE_DATABASE_URL).
+func isolateFleuveEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("FLEUVE_CONFIG", "")
+	for _, m := range allKeyMaps {
+		for suffix := range m {
+			t.Setenv(fmt.Sprintf("FLEUVE_%s", suffix), "")
+		}
+	}
+}
+
 func TestLoadConfig_fromFile(t *testing.T) {
+	isolateFleuveEnv(t)
 	dir := t.TempDir()
 	t.Chdir(dir)
 	content := `[fleuve]
@@ -37,6 +51,7 @@ snapshot_interval = 10
 }
 
 func TestLoadConfig_envOverridesToml(t *testing.T) {
+	isolateFleuveEnv(t)
 	t.Setenv("FLEUVE_NAMESPACE", "from-env")
 	t.Setenv("FLEUVE_ENABLE_TRUNCATION", "true")
 
@@ -62,6 +77,7 @@ enable_truncation = false
 }
 
 func TestLoadConfig_missingFleuveTable(t *testing.T) {
+	isolateFleuveEnv(t)
 	dir := t.TempDir()
 	t.Chdir(dir)
 	if err := os.WriteFile("fleuve.toml", []byte(`other = 1
