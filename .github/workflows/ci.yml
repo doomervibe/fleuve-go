@@ -172,10 +172,10 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The securego/gosec action uses docker://securego/gosec:2.24.0, which lags the
+      # tagged release and can disagree with `go run gosec@v2.24.6`. Run the tool via Go instead.
       - name: Gosec
-        uses: securego/gosec@v2.24.6
-        with:
-          args: "-exclude-dir=examples -exclude=G104 ./..."
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.24.6 -exclude-dir=examples -exclude=G104 ./...
 
       # Tags are semver with a leading v (e.g. v0.35.0); bare 0.28.0 does not resolve.
       - name: Trivy filesystem
