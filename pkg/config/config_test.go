@@ -1,21 +1,34 @@
 package config
 
 import (
-	"fmt"
 	"os"
 	"testing"
 )
 
-// isolateFleuveEnv clears FLEUVE_* override variables so tests are not affected
-// by the host environment (e.g. CI FLEUVE_DATABASE_URL).
+// isolateFleuveEnv removes FLEUVE_* override variables for the duration of the test
+// and restores them afterward. Using os.Unsetenv is more reliable than t.Setenv(k, ""):
+// on some platforms an "empty" set still leaves a value visible to os.Environ / Getenv,
+// so applyEnvOverrides would keep picking up CI values like FLEUVE_DATABASE_URL.
 func isolateFleuveEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("FLEUVE_CONFIG", "")
+	keys := []string{"FLEUVE_CONFIG"}
 	for _, m := range allKeyMaps {
 		for suffix := range m {
-			t.Setenv(fmt.Sprintf("FLEUVE_%s", suffix), "")
+			keys = append(keys, "FLEUVE_"+suffix)
 		}
 	}
+	saved := make(map[string]string)
+	for _, k := range keys {
+		if v, ok := os.LookupEnv(k); ok {
+			saved[k] = v
+			_ = os.Unsetenv(k)
+		}
+	}
+	t.Cleanup(func() {
+		for k, v := range saved {
+			_ = os.Setenv(k, v)
+		}
+	})
 }
 
 func TestLoadConfig_fromFile(t *testing.T) {
