@@ -2,12 +2,13 @@ package actions
 
 import (
 	"context"
+	crand "crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -501,6 +502,16 @@ func (ex *ActionExecutor) consumeWithTimeout(
 // RetryPolicy Handling
 // =============================================================================
 
+// randUnitFloat01 returns a uniform float in [0, 1) using crypto/rand (for backoff jitter).
+func randUnitFloat01() float64 {
+	var buf [8]byte
+	if _, err := crand.Read(buf[:]); err != nil {
+		return 0
+	}
+	u := binary.BigEndian.Uint64(buf[:])
+	return float64(u>>11) / float64(1<<53)
+}
+
 // calculateBackoff computes the delay before the next retry.
 func (ex *ActionExecutor) calculateBackoff(policy model.RetryPolicy, retryCount int) time.Duration {
 	backoffMin := ex.parseDuration(policy.BackoffMin, 1*time.Second)
@@ -533,10 +544,10 @@ func (ex *ActionExecutor) calculateBackoff(policy model.RetryPolicy, retryCount 
 		}
 	}
 
-	// Apply jitter: add random(0, jitter * delay)
+	// Apply jitter: add random(0, jitter * delay) using crypto/rand (not a secret, but unpredictable).
 	if policy.BackoffJitter > 0 && delay > 0 {
 		jitterRange := float64(delay) * policy.BackoffJitter
-		jitter := time.Duration(rand.Float64() * jitterRange)
+		jitter := time.Duration(randUnitFloat01() * jitterRange)
 		delay += jitter
 	}
 

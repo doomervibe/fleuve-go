@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +92,9 @@ func init() {
 //  2. $FLEUVE_CONFIG environment variable
 //  3. fleuve.toml in the current working directory
 //
+// The resolved file path must lie under the process working directory (enforced
+// via [os.Root]); use `cd` to the config directory or a symlink under cwd if needed.
+//
 // It returns the contents of the [fleuve] table as a map[string]any.
 func load_fleuve_toml(path string) (map[string]any, error) {
 	if path == "" {
@@ -100,14 +104,14 @@ func load_fleuve_toml(path string) (map[string]any, error) {
 		path = "fleuve.toml"
 	}
 
-	data, err := os.ReadFile(path)
+	data, resolved, err := readFleuveTomlBytes(path)
 	if err != nil {
-		return nil, fmt.Errorf("reading config file %q: %w", path, err)
+		return nil, err
 	}
 
 	var raw map[string]any
 	if err := toml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing TOML from %q: %w", path, err)
+		return nil, fmt.Errorf("parsing TOML from %q: %w", resolved, err)
 	}
 
 	fleuveSection, ok := raw["fleuve"]
@@ -118,10 +122,56 @@ func load_fleuve_toml(path string) (map[string]any, error) {
 
 	sectionMap, ok := fleuveSection.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("[fleuve] section in %q is not a table", path)
+		return nil, fmt.Errorf("[fleuve] section in %q is not a table", resolved)
 	}
 
 	return sectionMap, nil
+}
+
+// readFleuveTomlBytes loads config file bytes relative to the process working directory
+// using [os.Root], so paths cannot escape the cwd (mitigates path traversal from env/flags).
+func readFleuveTomlBytes(path string) (data []byte, resolved string, err error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, "", fmt.Errorf("get working directory: %w", err)
+	}
+	absWD, err := filepath.Abs(wd)
+	if err != nil {
+		return nil, "", fmt.Errorf("abs working directory: %w", err)
+	}
+	root, err := os.OpenRoot(absWD)
+	if err != nil {
+		return nil, "", fmt.Errorf("open config root %q: %w", absWD, err)
+	}
+	defer root.Close()
+
+	name := filepath.Clean(path)
+	var rel string
+	if filepath.IsAbs(name) {
+		absPath, err := filepath.Abs(name)
+		if err != nil {
+			return nil, "", fmt.Errorf("abs config path: %w", err)
+		}
+		rel, err = filepath.Rel(absWD, absPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("config file %q must be under working directory %q: %w", path, wd, err)
+		}
+	} else {
+		rel = name
+	}
+	rel = filepath.Clean(rel)
+	if !filepath.IsLocal(rel) {
+		return nil, "", fmt.Errorf("invalid config path %q", path)
+	}
+	relSlash := filepath.ToSlash(rel)
+
+	data, err = root.ReadFile(relSlash)
+	if err != nil {
+		full := filepath.Join(absWD, filepath.FromSlash(relSlash))
+		return nil, "", fmt.Errorf("reading config file %q: %w", full, err)
+	}
+	full := filepath.Join(absWD, filepath.FromSlash(relSlash))
+	return data, full, nil
 }
 
 // applyEnvOverrides inspects all FLEUVE_* environment variables and

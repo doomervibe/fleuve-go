@@ -6,9 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/doomervibe/fleuve-go/pkg/model"
 )
+
+func sanitizeLogMessage(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	return strings.ReplaceAll(s, "\r", " ")
+}
 
 func stateToMap(s model.State) map[string]any {
 	if s == nil {
@@ -88,7 +94,7 @@ func (h *handler) resolveWorkflowState(ctx context.Context, workflowID, wfType s
 			return st, ver
 		}
 		if !errors.Is(err, ErrStateUnresolved) {
-			log.Printf("uibackend: StateResolver(%q,%q): %v", workflowID, wfType, err)
+			log.Printf("uibackend: StateResolver(%q,%q): %s", workflowID, wfType, sanitizeLogMessage(err.Error()))
 		}
 	}
 	if wr, ok := h.replayByType[wfType]; ok {
@@ -96,7 +102,7 @@ func (h *handler) resolveWorkflowState(ctx context.Context, workflowID, wfType s
 		if err == nil {
 			return st, ver
 		}
-		log.Printf("uibackend: replay state %q: %v", workflowID, err)
+		log.Printf("uibackend: replay state %q: %s", workflowID, sanitizeLogMessage(err.Error()))
 	}
 	return jsonObject(latestBody), latestVer
 }

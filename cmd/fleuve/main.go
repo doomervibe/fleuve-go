@@ -41,7 +41,7 @@ func main() {
 	case "-h", "--help", "help":
 		printUsage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", command)
+		fmt.Fprintf(os.Stderr, "unknown command: %q\n\n", command)
 		printUsage()
 		os.Exit(1)
 	}
@@ -127,7 +127,7 @@ func doStartProject(name, path, module string) error {
 	for _, item := range structure {
 		fullPath := path + "/" + item.path
 		if item.isDir {
-			if err := os.MkdirAll(fullPath, 0755); err != nil {
+			if err := os.MkdirAll(fullPath, 0750); err != nil {
 				return fmt.Errorf("failed to create directory %s: %w", fullPath, err)
 			}
 		}
@@ -135,7 +135,7 @@ func doStartProject(name, path, module string) error {
 
 	// Create go.mod
 	goMod := fmt.Sprintf("module %s\n\ngo 1.22\n\nrequire github.com/doomervibe/fleuve-go v0.0.0\n", module)
-	if err := os.WriteFile(path+"/"+name+"/go.mod", []byte(goMod), 0644); err != nil {
+	if err := os.WriteFile(path+"/"+name+"/go.mod", []byte(goMod), 0600); err != nil {
 		return fmt.Errorf("failed to create go.mod: %w", err)
 	}
 
@@ -149,7 +149,7 @@ snapshot_interval = 0
 max_inflight = 100
 max_cache_size = 10000
 `
-	if err := os.WriteFile(path+"/"+name+"/fleuve.toml", []byte(fleuveToml), 0644); err != nil {
+	if err := os.WriteFile(path+"/"+name+"/fleuve.toml", []byte(fleuveToml), 0600); err != nil {
 		return fmt.Errorf("failed to create fleuve.toml: %w", err)
 	}
 
@@ -190,7 +190,7 @@ func (w *%sWorkflow) IsFinalEvent(e model.Event) bool {
 	return false
 }
 `, capitalize(name), capitalize(name), capitalize(name), capitalize(name), strings.ToLower(name), capitalize(name), capitalize(name), capitalize(name), capitalize(name), capitalize(name))
-	if err := os.WriteFile(path+"/"+name+"/workflows/"+strings.ToLower(name)+".go", []byte(workflowFile), 0644); err != nil {
+	if err := os.WriteFile(path+"/"+name+"/workflows/"+strings.ToLower(name)+".go", []byte(workflowFile), 0600); err != nil {
 		return fmt.Errorf("failed to create workflow file: %w", err)
 	}
 
@@ -251,7 +251,7 @@ Flags:
 // doAddWorkflow creates a new workflow file in the project.
 func doAddWorkflow(name, path string) error {
 	workflowDir := path + "/workflows"
-	if err := os.MkdirAll(workflowDir, 0755); err != nil {
+	if err := os.MkdirAll(workflowDir, 0750); err != nil {
 		return fmt.Errorf("failed to create workflows directory: %w", err)
 	}
 
@@ -292,7 +292,7 @@ func (w *%sWorkflow) IsFinalEvent(e model.Event) bool {
 `, capitalize(name), strings.ToLower(name), capitalize(name), capitalize(name), strings.ToLower(name), capitalize(name), capitalize(name), capitalize(name), capitalize(name), capitalize(name), capitalize(name))
 
 	filePath := workflowDir + "/" + strings.ToLower(name) + ".go"
-	if err := os.WriteFile(filePath, []byte(workflowFile), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(workflowFile), 0600); err != nil {
 		return fmt.Errorf("failed to create workflow file: %w", err)
 	}
 
@@ -391,7 +391,7 @@ func runAdmin() {
 	case "-h", "--help", "help":
 		printAdminUsage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown admin subcommand: %s\n\n", subcommand)
+		fmt.Fprintf(os.Stderr, "unknown admin subcommand: %q\n\n", subcommand)
 		printAdminUsage()
 		os.Exit(1)
 	}

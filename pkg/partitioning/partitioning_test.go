@@ -4,6 +4,15 @@ import (
 	"testing"
 )
 
+func TestGetPartitionIndex_nonPositive(t *testing.T) {
+	if GetPartitionIndex("any", 0) != 0 {
+		t.Fatal("totalPartitions 0 should yield 0")
+	}
+	if GetPartitionIndex("any", -3) != 0 {
+		t.Fatal("negative totalPartitions should yield 0")
+	}
+}
+
 func TestPartitionedReaderName(t *testing.T) {
 	got := PartitionedReaderName("order_workflow", 0, 3)
 	want := "order_workflow_runner_partition_0_of_3"

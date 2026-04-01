@@ -1,7 +1,7 @@
 package partitioning
 
 import (
-	"crypto/md5"
+	"crypto/md5" // #nosec G501 -- MD5 only for stable partition bucketing (Python Fleuve parity), not security.
 	"encoding/hex"
 	"strconv"
 )
@@ -15,11 +15,18 @@ func PartitionedReaderName(workflowType string, partitionIndex, totalPartitions 
 
 // GetPartitionIndex calculates the partition index for a given workflow ID.
 // It uses MD5 hashing to ensure consistent distribution across partitions.
+// MD5 is used only as a deterministic mixing function, not for cryptography.
 func GetPartitionIndex(workflowID string, totalPartitions int) int {
-	hash := md5.Sum([]byte(workflowID))
+	if totalPartitions <= 0 {
+		return 0
+	}
+	tp := uint64(totalPartitions)       // #nosec G115 -- totalPartitions validated > 0 above.
+	hash := md5.Sum([]byte(workflowID)) // #nosec G401 -- non-cryptographic partition routing; Fleuve Python parity.
 	hexStr := hex.EncodeToString(hash[:])
 	hashValue, _ := strconv.ParseUint(hexStr, 16, 64)
-	return int(hashValue % uint64(totalPartitions))
+	mod := hashValue % tp
+	/* #nosec G115 -- mod < tp and totalPartitions is a small positive int from callers. */
+	return int(mod)
 }
 
 // IsMine returns true if the given workflow ID belongs to the specified partition.

@@ -31,8 +31,11 @@ func DeriveKey(key []byte) []byte {
 func pkcs7Pad(data []byte, blockSize int) []byte {
 	padding := blockSize - (len(data) % blockSize)
 	padText := make([]byte, padding)
+	// PKCS7 byte value equals padding length; Encrypt only uses aes.BlockSize (16).
+	/* #nosec G115 -- padding is in [1, blockSize] and blockSize is 16 for AES. */
+	padByte := uint8(padding)
 	for i := range padText {
-		padText[i] = byte(padding)
+		padText[i] = padByte
 	}
 	return append(data, padText...)
 }
@@ -46,8 +49,8 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 		return nil, ErrInvalidBlockSize
 	}
 
-	// Get padding value from last byte
-	padding := int(data[len(data)-1])
+	padByte := data[len(data)-1]
+	padding := int(padByte)
 
 	// Validate padding value
 	if padding == 0 || padding > blockSize || padding > len(data) {
@@ -56,7 +59,7 @@ func pkcs7Unpad(data []byte, blockSize int) ([]byte, error) {
 
 	// Verify all padding bytes match
 	for i := len(data) - padding; i < len(data); i++ {
-		if data[i] != byte(padding) {
+		if data[i] != padByte {
 			return nil, ErrInvalidPadding
 		}
 	}
@@ -86,8 +89,9 @@ func Encrypt(plaintext []byte, key []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	// Encrypt using CBC mode
+	// Encrypt using CBC mode (IV = nonce filled from crypto/rand above).
 	ciphertext := make([]byte, len(paddedPlaintext))
+	/* #nosec G407 -- IV is randomly generated per encryption, not a constant. */
 	mode := cipher.NewCBCEncrypter(block, nonce)
 	mode.CryptBlocks(ciphertext, paddedPlaintext)
 
@@ -124,8 +128,9 @@ func Decrypt(ciphertext []byte, key []byte) ([]byte, error) {
 		return nil, ErrInvalidBlockSize
 	}
 
-	// Decrypt using CBC mode
+	// Decrypt using CBC mode (IV read from ciphertext prefix).
 	plaintext := make([]byte, len(encryptedData))
+	/* #nosec G407 -- IV is stored nonce from Encrypt, not a hardcoded value. */
 	mode := cipher.NewCBCDecrypter(block, nonce)
 	mode.CryptBlocks(plaintext, encryptedData)
 

@@ -2,24 +2,23 @@ package config
 
 import (
 	"os"
-	"path/filepath"
 	"testing"
 )
 
 func TestLoadConfig_fromFile(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fleuve.toml")
+	t.Chdir(dir)
 	content := `[fleuve]
 database_url = "postgres://fromfile"
 nats_url = "nats://local:4222"
 enable_jetstream = true
 snapshot_interval = 10
 `
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile("fleuve.toml", []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig(path)
+	cfg, err := LoadConfig("fleuve.toml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,15 +41,15 @@ func TestLoadConfig_envOverridesToml(t *testing.T) {
 	t.Setenv("FLEUVE_ENABLE_TRUNCATION", "true")
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fleuve.toml")
-	if err := os.WriteFile(path, []byte(`[fleuve]
+	t.Chdir(dir)
+	if err := os.WriteFile("fleuve.toml", []byte(`[fleuve]
 namespace = "from-toml"
 enable_truncation = false
-`), 0o644); err != nil {
+`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig(path)
+	cfg, err := LoadConfig("fleuve.toml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,13 +63,13 @@ enable_truncation = false
 
 func TestLoadConfig_missingFleuveTable(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "fleuve.toml")
-	if err := os.WriteFile(path, []byte(`other = 1
-`), 0o644); err != nil {
+	t.Chdir(dir)
+	if err := os.WriteFile("fleuve.toml", []byte(`other = 1
+`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	cfg, err := LoadConfig(path)
+	cfg, err := LoadConfig("fleuve.toml")
 	if err != nil {
 		t.Fatal(err)
 	}
