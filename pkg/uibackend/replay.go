@@ -12,8 +12,16 @@ import (
 )
 
 func sanitizeLogMessage(s string) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	return strings.ReplaceAll(s, "\r", " ")
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if r == '\n' || r == '\r' || r < 0x20 {
+			b.WriteByte(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func stateToMap(s model.State) map[string]any {
@@ -94,7 +102,7 @@ func (h *handler) resolveWorkflowState(ctx context.Context, workflowID, wfType s
 			return st, ver
 		}
 		if !errors.Is(err, ErrStateUnresolved) {
-			log.Printf("uibackend: StateResolver(%q,%q): %s", workflowID, wfType, sanitizeLogMessage(err.Error()))
+			log.Printf("uibackend: StateResolver(%q,%q): %s", sanitizeLogMessage(workflowID), sanitizeLogMessage(wfType), sanitizeLogMessage(err.Error())) // #nosec G706 -- fields stripped of control chars
 		}
 	}
 	if wr, ok := h.replayByType[wfType]; ok {
@@ -102,7 +110,7 @@ func (h *handler) resolveWorkflowState(ctx context.Context, workflowID, wfType s
 		if err == nil {
 			return st, ver
 		}
-		log.Printf("uibackend: replay state %q: %s", workflowID, sanitizeLogMessage(err.Error()))
+		log.Printf("uibackend: replay state %q: %s", sanitizeLogMessage(workflowID), sanitizeLogMessage(err.Error())) // #nosec G706 -- fields stripped of control chars
 	}
 	return jsonObject(latestBody), latestVer
 }
