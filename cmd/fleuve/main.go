@@ -88,7 +88,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 
 	if *name == "" {
 		fmt.Fprintln(os.Stderr, "error: --name is required")
@@ -234,7 +234,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 
 	if *name == "" {
 		fmt.Fprintln(os.Stderr, "error: --name is required")
@@ -326,7 +326,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 
 	if err := doValidate(*workflowPath, *verbose); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -438,7 +438,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	if *workflowID == "" {
 		fmt.Fprintln(os.Stderr, "error: --id is required")
@@ -473,7 +473,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	fmt.Println("Listing workflows")
 	fmt.Printf("Type filter: %s\n", *workflowType)
@@ -501,7 +501,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	if *workflowID == "" {
 		fmt.Fprintln(os.Stderr, "error: --id is required")
@@ -532,7 +532,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	if *workflowID == "" {
 		fmt.Fprintln(os.Stderr, "error: --id is required")
@@ -563,7 +563,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	if *workflowID == "" {
 		fmt.Fprintln(os.Stderr, "error: --id is required")
@@ -595,7 +595,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	if *workflowID == "" {
 		fmt.Fprintln(os.Stderr, "error: --id is required")
@@ -628,7 +628,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	fmt.Println("Checking system health...")
 	fmt.Printf("Gateway address: %s\n", *addr)
@@ -661,7 +661,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[3:])
+	_ = fs.Parse(os.Args[3:])
 
 	if *workflowType == "" {
 		fmt.Fprintln(os.Stderr, "error: --type is required")
@@ -700,7 +700,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[2:])
+	_ = fs.Parse(os.Args[2:])
 
 	fmt.Printf("Starting UI server on %s\n", *addr)
 	fmt.Printf("Gateway API: %s\n", *gatewayAddr)

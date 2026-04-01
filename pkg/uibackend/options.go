@@ -51,10 +51,14 @@ const (
 	defaultDelaysTable        = "delay_schedules"
 )
 
-func (o Options) quotedEvents() (string, error)        { return quoteIdent(o.EventsTable, defaultEventsTable) }
-func (o Options) quotedSubscriptions() (string, error) { return quoteIdent(o.SubscriptionsTable, defaultSubscriptionsTable) }
-func (o Options) quotedActivities() (string, error)    { return quoteIdent(o.ActivitiesTable, defaultActivitiesTable) }
-func (o Options) quotedDelays() (string, error)        { return quoteIdent(o.DelaysTable, defaultDelaysTable) }
+func (o Options) quotedEvents() (string, error) { return quoteIdent(o.EventsTable, defaultEventsTable) }
+func (o Options) quotedSubscriptions() (string, error) {
+	return quoteIdent(o.SubscriptionsTable, defaultSubscriptionsTable)
+}
+func (o Options) quotedActivities() (string, error) {
+	return quoteIdent(o.ActivitiesTable, defaultActivitiesTable)
+}
+func (o Options) quotedDelays() (string, error) { return quoteIdent(o.DelaysTable, defaultDelaysTable) }
 
 func quoteIdent(name, def string) (string, error) {
 	if name == "" {

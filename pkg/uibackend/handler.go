@@ -45,13 +45,13 @@ func NewHandler(opts Options) (http.Handler, error) {
 		replayCopy[k] = v
 	}
 	h := &handler{
-		pool:            opts.Pool,
-		ev:              ev,
-		sub:             sub,
-		act:             act,
-		del:             del,
-		stateResolver:   opts.StateResolver,
-		replayByType:    replayCopy,
+		pool:          opts.Pool,
+		ev:            ev,
+		sub:           sub,
+		act:           act,
+		del:           del,
+		stateResolver: opts.StateResolver,
+		replayByType:  replayCopy,
 	}
 	return h, nil
 }
@@ -74,13 +74,13 @@ func NewCombinedHandler(uiTitle string, opts Options) (http.Handler, error) {
 }
 
 type handler struct {
-	pool            *pgxpool.Pool
-	ev              string
-	sub             string
-	act             string
-	del             string
-	stateResolver   StateResolver
-	replayByType    map[string]WorkflowReplay
+	pool          *pgxpool.Pool
+	ev            string
+	sub           string
+	act           string
+	del           string
+	stateResolver StateResolver
+	replayByType  map[string]WorkflowReplay
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -285,9 +285,9 @@ func (h *handler) getWorkflowTypes(w http.ResponseWriter, r *http.Request) {
 }
 
 type workflowTypeInfo struct {
-	WorkflowType string     `json:"workflow_type"`
-	WorkflowCount int64     `json:"workflow_count"`
-	EventCount    int64     `json:"event_count"`
+	WorkflowType  string     `json:"workflow_type"`
+	WorkflowCount int64      `json:"workflow_count"`
+	EventCount    int64      `json:"event_count"`
 	LastEventAt   *time.Time `json:"last_event_at,omitempty"`
 }
 
@@ -493,14 +493,14 @@ func (h *handler) getWorkflow(w http.ResponseWriter, r *http.Request, workflowID
 }
 
 type eventResponse struct {
-	GlobalID         int64          `json:"global_id"`
-	WorkflowID       string         `json:"workflow_id"`
-	WorkflowType     string         `json:"workflow_type"`
-	WorkflowVersion  int64          `json:"workflow_version"`
-	EventType        string         `json:"event_type"`
-	Body             map[string]any `json:"body"`
-	At               time.Time      `json:"at"`
-	Metadata         map[string]any `json:"metadata"`
+	GlobalID        int64          `json:"global_id"`
+	WorkflowID      string         `json:"workflow_id"`
+	WorkflowType    string         `json:"workflow_type"`
+	WorkflowVersion int64          `json:"workflow_version"`
+	EventType       string         `json:"event_type"`
+	Body            map[string]any `json:"body"`
+	At              time.Time      `json:"at"`
+	Metadata        map[string]any `json:"metadata"`
 }
 
 func (h *handler) getWorkflowEvents(w http.ResponseWriter, r *http.Request, workflowID string) {
@@ -920,18 +920,18 @@ func (h *handler) listActivities(w http.ResponseWriter, r *http.Request, f activ
 }
 
 type delayResponse struct {
-	WorkflowID      string           `json:"workflow_id"`
-	WorkflowType    string           `json:"workflow_type"`
-	DelayID         string           `json:"delay_id"`
-	DelayUntil      time.Time        `json:"delay_until"`
-	EventVersion    int64            `json:"event_version"`
-	CreatedAt       time.Time        `json:"created_at"`
-	NextCommand     map[string]any   `json:"next_command"`
-	DelayType       string           `json:"delay_type"`
-	NextCommandType string           `json:"next_command_type"`
-	CronExpression  *string          `json:"cron_expression,omitempty"`
-	CronTimezone    *string          `json:"cron_timezone,omitempty"`
-	NextFireTimes   []time.Time      `json:"next_fire_times,omitempty"`
+	WorkflowID      string         `json:"workflow_id"`
+	WorkflowType    string         `json:"workflow_type"`
+	DelayID         string         `json:"delay_id"`
+	DelayUntil      time.Time      `json:"delay_until"`
+	EventVersion    int64          `json:"event_version"`
+	CreatedAt       time.Time      `json:"created_at"`
+	NextCommand     map[string]any `json:"next_command"`
+	DelayType       string         `json:"delay_type"`
+	NextCommandType string         `json:"next_command_type"`
+	CronExpression  *string        `json:"cron_expression,omitempty"`
+	CronTimezone    *string        `json:"cron_timezone,omitempty"`
+	NextFireTimes   []time.Time    `json:"next_fire_times,omitempty"`
 }
 
 func (h *handler) listDelays(w http.ResponseWriter, r *http.Request, workflowType, workflowID string, limit, offset int) {
@@ -1068,17 +1068,17 @@ func nextCronFireTimes(expr, tzName string) []time.Time {
 }
 
 type statsResponse struct {
-	TotalWorkflows      int64            `json:"total_workflows"`
-	WorkflowsByType     map[string]int64 `json:"workflows_by_type"`
-	WorkflowsByState    map[string]int64 `json:"workflows_by_state"`
-	TotalEvents         int64            `json:"total_events"`
-	EventsByType        map[string]int64 `json:"events_by_type"`
-	TotalActivities     int64            `json:"total_activities"`
-	ActivitiesByStatus  map[string]int64 `json:"activities_by_status"`
-	PendingActivities   int64            `json:"pending_activities"`
-	FailedActivities    int64            `json:"failed_activities"`
-	TotalDelays         int64            `json:"total_delays"`
-	ActiveDelays        int64            `json:"active_delays"`
+	TotalWorkflows     int64            `json:"total_workflows"`
+	WorkflowsByType    map[string]int64 `json:"workflows_by_type"`
+	WorkflowsByState   map[string]int64 `json:"workflows_by_state"`
+	TotalEvents        int64            `json:"total_events"`
+	EventsByType       map[string]int64 `json:"events_by_type"`
+	TotalActivities    int64            `json:"total_activities"`
+	ActivitiesByStatus map[string]int64 `json:"activities_by_status"`
+	PendingActivities  int64            `json:"pending_activities"`
+	FailedActivities   int64            `json:"failed_activities"`
+	TotalDelays        int64            `json:"total_delays"`
+	ActiveDelays       int64            `json:"active_delays"`
 }
 
 func (h *handler) getStats(w http.ResponseWriter, r *http.Request) {

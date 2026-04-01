@@ -55,7 +55,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[1:])
+	_ = fs.Parse(os.Args[1:])
 
 	if *workflowType == "" {
 		fmt.Fprintln(os.Stderr, "error: -type is required")

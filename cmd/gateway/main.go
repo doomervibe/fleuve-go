@@ -35,8 +35,8 @@ import (
 	"github.com/doomervibe/fleuve-go/pkg/gateway"
 	"github.com/doomervibe/fleuve-go/pkg/model"
 	"github.com/doomervibe/fleuve-go/pkg/repo"
-	"github.com/doomervibe/fleuve-go/pkg/uiembed"
 	"github.com/doomervibe/fleuve-go/pkg/uibackend"
+	"github.com/doomervibe/fleuve-go/pkg/uiembed"
 )
 
 func main() {
@@ -60,7 +60,7 @@ Flags:
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(os.Args[1:])
+	_ = fs.Parse(os.Args[1:])
 
 	// Load configuration
 	cfg, err := config.LoadConfig(*configPath)

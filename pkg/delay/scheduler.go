@@ -107,7 +107,7 @@ func (s *DelayScheduler) RegisterDelay(ctx context.Context, workflowID, delayID 
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Delete existing schedule (replace semantics)
 	_, err = tx.Exec(ctx,
@@ -231,7 +231,7 @@ func (s *DelayScheduler) resumeWorkflow(ctx context.Context, schedule delaySched
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Get current max version for workflow (MAX is NULL when there are no matching rows).
 	var maxVer sql.NullInt64

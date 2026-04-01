@@ -156,7 +156,7 @@ func (r *Repo) ProcessCommand(ctx context.Context, id string, cmd model.Command)
 		if err != nil {
 			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
 		}
-		defer tx.Rollback(ctx)
+		defer func() { _ = tx.Rollback(ctx) }()
 
 		// Step 1: Acquire row-level lock on version=1 event
 		var lockKey int64
@@ -303,7 +303,7 @@ func (r *Repo) CreateNew(ctx context.Context, cmd model.Command, id string, tags
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Step 3: Insert workflow metadata if tags provided
 	if len(tags) > 0 {
@@ -371,7 +371,7 @@ func (r *Repo) PauseWorkflow(ctx context.Context, id string, reason string) (*mo
 	if err != nil {
 		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	state, err := r.loadStateTx(ctx, tx, id, nil)
 	if err != nil {
@@ -416,7 +416,7 @@ func (r *Repo) ResumeWorkflow(ctx context.Context, id string) (*model.StoredStat
 	if err != nil {
 		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	state, err := r.loadStateTx(ctx, tx, id, nil)
 	if err != nil {
@@ -458,7 +458,7 @@ func (r *Repo) CancelWorkflow(ctx context.Context, id string, reason string) (*m
 	if err != nil {
 		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	state, err := r.loadStateTx(ctx, tx, id, nil)
 	if err != nil {
@@ -517,7 +517,7 @@ func (r *Repo) ContinueAsNew(ctx context.Context, id string, newCmd model.Comman
 	if err != nil {
 		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Load current state
 	state, err := r.loadStateTx(ctx, tx, id, nil)
@@ -571,7 +571,7 @@ func (r *Repo) ReplayWorkflow(ctx context.Context, id string, fromVersion int64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Load base state at fromVersion-1
 	var baseState model.State
@@ -689,12 +689,10 @@ func (r *Repo) loadStateTx(ctx context.Context, tx pgx.Tx, id string, atVersion 
 			r.snapshotTable,
 		)
 		args := []any{id}
-		argIdx := 2
 
 		if atVersion != nil {
-			query += fmt.Sprintf(" AND version <= $%d", argIdx)
+			query += " AND version <= $2"
 			args = append(args, *atVersion)
-			argIdx++
 		}
 
 		err := tx.QueryRow(ctx, query, args...).Scan(&snapVersion, &snapState)
@@ -749,12 +747,10 @@ func (r *Repo) loadEventsTx(ctx context.Context, tx pgx.Tx, id string, afterVers
 		r.eventsTable,
 	)
 	args := []any{id, afterVersion}
-	argIdx := 3
 
 	if atVersion != nil {
-		query += fmt.Sprintf(" AND workflow_version <= $%d", argIdx)
+		query += " AND workflow_version <= $3"
 		args = append(args, *atVersion)
-		argIdx++
 	}
 
 	query += " ORDER BY workflow_version"
@@ -1006,14 +1002,6 @@ func (r *Repo) parseState(data json.RawMessage) (model.State, error) {
 		return nil, err
 	}
 	return &state, nil
-}
-
-// namespaceArg returns the namespace argument for queries.
-func (r *Repo) namespaceArg() interface{} {
-	if r.namespace == nil {
-		return nil
-	}
-	return *r.namespace
 }
 
 // isUniqueViolation checks if an error is a PostgreSQL unique constraint violation.

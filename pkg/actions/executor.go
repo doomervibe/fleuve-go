@@ -275,7 +275,7 @@ func (ex *ActionExecutor) _runActionWithRetry(ctx context.Context, event *model.
 		case ex.globalSem <- struct{}{}:
 			defer func() { <-ex.globalSem }()
 		case <-ctx.Done():
-			ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
+			_ = ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
 			return
 		}
 	}
@@ -287,7 +287,7 @@ func (ex *ActionExecutor) _runActionWithRetry(ctx context.Context, event *model.
 		case wfSem <- struct{}{}:
 			defer func() { <-wfSem }()
 		case <-ctx.Done():
-			ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
+			_ = ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
 			return
 		}
 	}
@@ -299,7 +299,7 @@ func (ex *ActionExecutor) _runActionWithRetry(ctx context.Context, event *model.
 		// Check for cancellation
 		select {
 		case <-ctx.Done():
-			ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
+			_ = ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
 			return
 		default:
 		}
@@ -343,7 +343,7 @@ func (ex *ActionExecutor) _runActionWithRetry(ctx context.Context, event *model.
 
 		// Handle cancellation - don't retry
 		if errors.Is(execErr, ErrActionCancelled) {
-			ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
+			_ = ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
 			return
 		}
 
@@ -364,7 +364,7 @@ func (ex *ActionExecutor) _runActionWithRetry(ctx context.Context, event *model.
 			case <-time.After(delay):
 				// Continue to next retry
 			case <-ctx.Done():
-				ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
+				_ = ex.updateStatus(ctx, workflowID, eventNumber, ActivityStatusCancelled, nil, "")
 				return
 			}
 		}

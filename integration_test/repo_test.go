@@ -11,9 +11,10 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/doomervibe/fleuve-go/pkg/model"
 	"github.com/doomervibe/fleuve-go/pkg/repo"
-	"github.com/jackc/pgx/v5"
 )
 
 // unknownCmd is a command that no workflow handles, used to trigger rejections.

@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 // FleuveTracer wraps an OpenTelemetry tracer with Fleuve-specific configuration.
@@ -31,7 +32,7 @@ func NewFleuveTracer(workflowType string, enabled bool) *FleuveTracer {
 	if enabled {
 		t = otel.Tracer("fleuve")
 	} else {
-		t = trace.NewNoopTracerProvider().Tracer("fleuve-noop")
+		t = noop.NewTracerProvider().Tracer("fleuve-noop")
 	}
 
 	return &FleuveTracer{

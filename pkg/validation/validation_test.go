@@ -10,31 +10,6 @@ import (
 // Valid Workflow Implementation (for positive test cases)
 // =============================================================================
 
-type validState struct {
-	*model.StateBase
-	Data string `json:"data"`
-}
-
-func (s *validState) Copy() model.State {
-	return &validState{
-		StateBase: s.StateBase.Copy().(*model.StateBase),
-		Data:      s.Data,
-	}
-}
-
-type validCommand struct {
-	action string
-}
-
-func (c *validCommand) CommandType() string { return "valid_command" }
-
-type validEvent struct {
-	model.EventBase
-	Value string `json:"value"`
-}
-
-func (e *validEvent) Type() string { return "valid_event" }
-
 type validWorkflow struct{}
 
 func (w *validWorkflow) Name() string { return "valid_workflow" }

@@ -247,7 +247,7 @@ func (p *JetStreamPublisher) pollOnceWithLockedConn(ctx context.Context, conn *p
 	if err != nil {
 		return 0, fmt.Errorf("jetstream: begin tx: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	// SELECT unpushed events for this workflow type, ordered by global_id
 	selectQuery := fmt.Sprintf(

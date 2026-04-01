@@ -177,8 +177,9 @@ jobs:
         with:
           args: "-exclude-dir=examples -exclude=G104 ./..."
 
+      # Tags are semver with a leading v (e.g. v0.35.0); bare 0.28.0 does not resolve.
       - name: Trivy filesystem
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.35.0
         with:
           scan-type: fs
           scan-ref: .

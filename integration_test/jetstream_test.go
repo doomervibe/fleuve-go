@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/doomervibe/fleuve-go/pkg/jetstream"
 	"github.com/doomervibe/fleuve-go/pkg/stream"
-	"github.com/nats-io/nats.go"
 )
 
 func natsURL() string {

@@ -6,15 +6,6 @@ import (
 	"strconv"
 )
 
-// makeHashPartitionRule creates a predicate function that determines whether
-// a given workflow ID belongs to the specified partition.
-// The partitioning is consistent: the same ID will always map to the same partition.
-func makeHashPartitionRule(partitionIndex, totalPartitions int) func(string) bool {
-	return func(workflowID string) bool {
-		return GetPartitionIndex(workflowID, totalPartitions) == partitionIndex
-	}
-}
-
 // PartitionedReaderName returns the standard naming convention for a partitioned reader.
 // Format: "{workflow_type}_runner_partition_{partition_index}_of_{total_partitions}"
 // Example: "order_workflow_runner_partition_0_of_3"
