@@ -25,7 +25,7 @@ Run SQL in `migrations/` in filename order against the target database. Do not s
 
 ## Integration tests
 
-- Compose file: `docker-compose.test.yml` (and workflow in `.github/workflows/go.yml`).
+- Compose file: `docker-compose.test.yml` (and workflow in `.github/workflows/ci.yml`).
 - Tests that need real Postgres/NATS are tagged or live under `integration_test/`; run with the documented compose stack when applicable.
 
 ## Observability

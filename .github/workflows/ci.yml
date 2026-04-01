@@ -1,0 +1,273 @@
+# Fleuve Go — continuous integration
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GOFLAGS: -mod=readonly
+
+jobs:
+  vet-build:
+    name: Vet & build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify module
+        run: go mod verify
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Build all packages
+        run: go build -trimpath -buildvcs=false ./...
+
+      - name: Build release binaries (linux/amd64)
+        run: |
+          mkdir -p bin
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-w -s' -o bin/fleuve-runner ./cmd/runner
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-w -s' -o bin/fleuve-gateway ./cmd/gateway
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-w -s' -o bin/fleuve ./cmd/fleuve
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-w -s' -o bin/fleuve-ui ./examples/ui_server
+
+      - name: Upload binaries artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64-binaries
+          path: bin/
+          retention-days: 7
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+          install-mode: goinstall
+          args: --timeout=10m
+
+  test-unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Packages without integration_test
+        run: |
+          pkgs=$(go list ./... | grep -Fv 'github.com/doomervibe/fleuve-go/integration_test' || true)
+          if [ -n "$pkgs" ]; then
+            go test -race -count=1 -timeout=10m $pkgs
+          fi
+
+  test:
+    name: Test (race + realdeps + coverage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [vet-build]
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: fleuve_test
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d fleuve_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      FLEUVE_DATABASE_URL: postgresql://test:test@localhost:5432/fleuve_test?sslmode=disable
+      FLEUVE_NATS_URL: nats://localhost:4222
+      FLEUVE_ENVIRONMENT: ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Service containers cannot pass a custom CMD; JetStream needs --jetstream.
+      - name: Start NATS (JetStream)
+        run: |
+          docker run -d --name nats-ci -p 4222:4222 -p 8222:8222 nats:2.10-alpine --jetstream -m 8222
+          for i in $(seq 1 45); do
+            curl -sf "http://127.0.0.1:8222/varz" >/dev/null && exit 0
+            sleep 1
+          done
+          echo "NATS did not become ready"; docker logs nats-ci; exit 1
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # integration_test applies SQL from ../migrations in TestMain (no separate migrate CLI).
+      - name: Go test (all packages)
+        run: |
+          go test -tags=realdeps -race -count=1 -timeout=20m \
+            -coverprofile=coverage.out -covermode=atomic \
+            ./...
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 14
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.out
+          flags: all
+          name: fleuve-go
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Gosec
+        uses: securego/gosec@v2.24.6
+        with:
+          args: "-exclude-dir=examples -exclude=G104 ./..."
+
+      - name: Trivy filesystem
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+          ignore-unfixed: true
+
+  benchmark:
+    name: Benchmarks
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: fleuve_bench
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d fleuve_bench"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      FLEUVE_DATABASE_URL: postgresql://test:test@localhost:5432/fleuve_bench?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Benchmarks
+        run: go test -bench=. -benchmem -benchtime=3s ./pkg/...
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [vet-build, lint, test-unit, test, security]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Registry configuration
+        id: reg
+        env:
+          DOCKER_USER: ${{ secrets.DOCKER_USERNAME }}
+        run: |
+          if [ -n "$DOCKER_USER" ]; then
+            echo "image=${DOCKER_USER}/fleuve-go" >> "$GITHUB_OUTPUT"
+            echo "do_push=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=fleuve-go/local" >> "$GITHUB_OUTPUT"
+            echo "do_push=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.reg.outputs.do_push == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.reg.outputs.image }}
+          tags: |
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ steps.reg.outputs.do_push == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
