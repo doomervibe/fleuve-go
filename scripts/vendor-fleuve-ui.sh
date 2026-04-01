@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
-# Copy Python Fleuve Vite build output into pkg/uiembed/dist for go:embed.
-# Usage:
-#   ./scripts/vendor-fleuve-ui.sh [/path/to/fleuve/ui/frontend_dist]
-# Or set FLEUVE_PYTHON_UI_DIST to that directory.
+# Sync the Python Fleuve UI static build into this module for go:embed.
+# Source (sibling checkout): ../les/fleuve/ui/frontend_dist
+# Target: pkg/uiembed/dist/
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="${1:-${FLEUVE_PYTHON_UI_DIST:-}}"
-if [[ -z "$SRC" || ! -d "$SRC" ]]; then
-  echo "usage: FLEUVE_PYTHON_UI_DIST=/path/to/frontend_dist $0" >&2
-  echo "   or: $0 /path/to/fleuve/ui/frontend_dist" >&2
+SRC="${FLEUVE_UI_DIST:-$ROOT/../les/fleuve/ui/frontend_dist}"
+DST="$ROOT/pkg/uiembed/dist"
+if [[ ! -d "$SRC" ]]; then
+  echo "error: UI dist not found at $SRC (set FLEUVE_UI_DIST or clone les next to fleuve-go)" >&2
   exit 1
 fi
-DEST="$ROOT/pkg/uiembed/dist"
-rm -rf "$DEST"
-mkdir -p "$DEST"
-rsync -a --delete --exclude='.gitkeep' "$SRC"/ "$DEST"/
-echo "Vendored UI -> $DEST ($(find "$DEST" -type f | wc -l | tr -d ' ') files)"
-echo "Rebuild: go build -o /dev/null ./cmd/ui"
+mkdir -p "$DST"
+rsync -a --delete "$SRC/" "$DST/"
+echo "Vendored UI from $SRC -> $DST"

@@ -65,7 +65,7 @@ From the repository root:
 ```bash
 go build -o fleuve-runner   ./cmd/runner
 go build -o fleuve-gateway ./cmd/gateway
-go build -o fleuve-ui      ./cmd/ui
+go build -o fleuve-ui      ./examples/ui_server
 ```
 
 ---

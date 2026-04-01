@@ -1,9 +1,9 @@
 # HTTP API reference
 
-Two HTTP surfaces ship in this repository:
+HTTP surfaces in this repository:
 
 1. **Command gateway** (`fleuve-gateway`) — mutates workflow state via commands.  
-2. **Admin UI server** (`fleuve-ui`) — JSON API + static SPA (unless `-api-only`).
+2. **Admin UI** — JSON under `/api/*` + embedded SPA from [`pkg/uibackend`](../pkg/uibackend/) + [`pkg/uiembed`](../pkg/uiembed/): either the **`examples/ui_server`** reference binary or **`fleuve-gateway -with-ui`** (same port as commands).
 
 Both use Go 1.22+ **`http.ServeMux` patterns** with path wildcards (`{id}`, `{full_path...}`).
 

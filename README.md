@@ -44,6 +44,8 @@
 
 Full index: [docs/README.md](docs/README.md).
 
+**AI assistants:** design and wiring conventions live in [AGENTS.md](AGENTS.md) and [`.cursor/skills/fleuve-go/`](.cursor/skills/fleuve-go/SKILL.md).
+
 ---
 
 ## Quick start (minimal)
@@ -64,7 +66,7 @@ export FLEUVE_ENABLE_JETSTREAM=true
 ```bash
 go build -o fleuve-runner   ./cmd/runner
 go build -o fleuve-gateway ./cmd/gateway
-go build -o fleuve-ui      ./cmd/ui
+go build -o fleuve-ui       ./examples/ui_server
 ```
 
 **4. Run** (three terminals, same `FLEUVE_DATABASE_URL`)
@@ -107,14 +109,14 @@ Add more types in **your** module: implement `model.Workflow`, `repo.NewPGXRepo`
 
 ## Vendored admin UI
 
-Static assets live under **`pkg/uiembed/dist/`** and are embedded at compile time. To refresh from a Python Fleuve UI build:
+Static assets live under **`pkg/uiembed/dist/`** and are embedded at compile time. To refresh from a sibling Python checkout (`../les/fleuve/ui/frontend_dist`) or set **`FLEUVE_UI_DIST`** to another path:
 
 ```bash
-./scripts/vendor-fleuve-ui.sh /path/to/fleuve/ui/frontend_dist
-go build -o fleuve-ui ./cmd/ui
+./scripts/vendor-fleuve-ui.sh
+go build -o fleuve-ui ./examples/ui_server
 ```
 
-Override at runtime: `-frontend /path` or `FLEUVE_FRONTEND_DIST`. JSON-only mode: `fleuve-ui -api-only`.
+The read API and static app are libraries (**`pkg/uibackend`**, **`pkg/uiembed`**); **`examples/ui_server`** is a thin reference server. Integrators compose the handlers in their own `main`.
 
 ---
 
@@ -124,10 +126,9 @@ Override at runtime: `-frontend /path` or `FLEUVE_FRONTEND_DIST`. JSON-only mode
 cmd/
   gateway/    # REST command API
   runner/     # Stream consumer + activities
-  ui/         # Admin API + static UI
 migrations/   # PostgreSQL schema (apply in order)
 pkg/          # Libraries (see docs/packages.md)
-examples/     # counter/, order/
+examples/     # counter/, ui_server/ (reference UI stack)
 scripts/      # vendor-fleuve-ui.sh
 ```
 

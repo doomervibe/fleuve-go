@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS external_subscriptions (
 CREATE INDEX IF NOT EXISTS idx_external_subscriptions_topic ON external_subscriptions (topic);
 
 -- Activities table (action execution tracking)
-CREATE TABLE IF NOT EXISTS activities (
+CREATE TABLE IF NOT EXISTS workflow_activities (
     id SERIAL PRIMARY KEY,
     workflow_id VARCHAR(255) NOT NULL,
     event_number BIGINT NOT NULL,
@@ -79,13 +79,13 @@ CREATE TABLE IF NOT EXISTS activities (
     error_type VARCHAR(255),
     result BYTEA,
     runner_id VARCHAR(255),
-    CONSTRAINT activities_unique UNIQUE (workflow_id, event_number)
+    CONSTRAINT workflow_activities_unique UNIQUE (workflow_id, event_number)
 );
 
-CREATE INDEX IF NOT EXISTS idx_activities_workflow_id ON activities (workflow_id);
-CREATE INDEX IF NOT EXISTS idx_activities_status ON activities (status);
-CREATE INDEX IF NOT EXISTS idx_activities_runner_id ON activities (runner_id);
-CREATE INDEX IF NOT EXISTS idx_activities_status_last_attempt ON activities (status, last_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_activities_workflow_id ON workflow_activities (workflow_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_activities_status ON workflow_activities (status);
+CREATE INDEX IF NOT EXISTS idx_workflow_activities_runner_id ON workflow_activities (runner_id);
+CREATE INDEX IF NOT EXISTS idx_workflow_activities_status_last_attempt ON workflow_activities (status, last_attempt_at);
 
 -- Delay schedules table
 CREATE TABLE IF NOT EXISTS delay_schedules (

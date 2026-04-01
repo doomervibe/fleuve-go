@@ -19,7 +19,7 @@ export FLEUVE_NATS_URL="nats://your-nats:4222"
 ./fleuve-runner -type CounterWorkflow
 ./fleuve-gateway -addr :8080
 ./fleuve-ui -addr :3000
-# optional: ./fleuve-ui -frontend /path/to/fleuve/ui/frontend_dist
+# or: go run ./examples/ui_server -addr :3000
 ```
 
 **No new migrations from Go** are required if tables already exist from Python’s Alembic migrations.

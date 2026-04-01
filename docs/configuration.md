@@ -22,6 +22,7 @@ max_cache_size = 10000
 
 # Features
 enable_jetstream = false
+# gateway_commands_via_nats = false  # HTTP gateway → runner over NATS; see docs/nats-gateway-commands.md
 enable_truncation = false
 enable_reconciliation = false
 enable_external_messaging = false
@@ -34,8 +35,6 @@ truncation_batch_size = 1000
 create_tables = true
 outbox_batch_size = 100
 outbox_poll_interval = "100ms"
-
-ui_title = ""
 ```
 
 Boolean env overrides accept `1`, `true`, `yes` (case-insensitive).
@@ -58,12 +57,13 @@ Boolean env overrides accept `1`, `true`, `yes` (case-insensitive).
 | `FLEUVE_ENABLE_OTEL` | `enable_otel` | Enables tracer init (see OTEL below) |
 | `FLEUVE_MAX_CACHE_SIZE` | `max_cache_size` | In-process ephemeral cache size |
 | `FLEUVE_ENABLE_JETSTREAM` | `enable_jetstream` | NATS JetStream publish/consume |
+| `FLEUVE_GATEWAY_COMMANDS_VIA_NATS` | `gateway_commands_via_nats` | Gateway delegates commands to runner via NATS ([nats-gateway-commands.md](./nats-gateway-commands.md)) |
 | `FLEUVE_ENABLE_RECONCILIATION` | `enable_reconciliation` | Reconciliation feature flag |
 | `FLEUVE_ENABLE_EXTERNAL_MESSAGING` | `enable_external_messaging` | External messaging feature flag |
 | `FLEUVE_CREATE_TABLES` | `create_tables` | Auto-create tables (if implemented on path) |
 | `FLEUVE_OUTBOX_BATCH_SIZE` | `outbox_batch_size` | Outbox batching |
 | `FLEUVE_OUTBOX_POLL_INTERVAL` | `outbox_poll_interval` | Go `time.ParseDuration` string |
-| `FLEUVE_UI_TITLE` | `ui_title` | Admin UI title / branding hook |
+| `FLEUVE_UI_TITLE` | — | Browser title for embedded admin UI ([`pkg/uiembed`](../pkg/uiembed/handler.go)); not part of `WorkflowConfig` |
 
 ### OpenTelemetry (tracing)
 
@@ -80,16 +80,20 @@ Used by [`pkg/tracing`](../pkg/tracing/otel.go). Tracing is on if **`enable_otel
 
 ---
 
-## `fleuve-ui` command-line flags
+## Reference UI server (`examples/ui_server`, Docker `fleuve-ui`)
 
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `-config` | `""` | Path to `fleuve.toml` |
 | `-addr` | `:3000` | Listen address |
-| `-frontend` | `""` | Directory overriding embedded UI; else `FLEUVE_FRONTEND_DIST` |
-| `-api-only` | `false` | No bundled static UI; JSON under `/`, CORS enabled |
+
+Uses embedded static files from `pkg/uiembed` and `FLEUVE_DATABASE_URL` / `[fleuve] database_url`. Optional: `FLEUVE_UI_TITLE` for the browser title (see `pkg/uiembed.ResolveUITitle`).
 
 `fleuve-gateway` and `fleuve-runner` use `-config` and their own flags (`-addr` on gateway, `-type` on runner).
+
+| Gateway flag | Default | Purpose |
+|----------------|---------|---------|
+| `-with-ui` | `false` | When set, the same listener also serves the embedded admin UI (`GET /`, `/health`, `/api/*`) using `pkg/uibackend` + `pkg/uiembed`, with **replay** wired from registered workflow types. `POST /commands/...` still goes to the command gateway. Title: `FLEUVE_UI_TITLE` or `uiembed.ResolveUITitle()` rules. |
 
 ---
 

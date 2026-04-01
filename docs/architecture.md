@@ -69,7 +69,7 @@ sequenceDiagram
 |--------|------|
 | `fleuve-gateway` | REST command API; registers **CounterWorkflow** via [`pkg/fleuvecmd`](../pkg/fleuvecmd/register.go) |
 | `fleuve-runner` | Consumes events (NATS or PG reader), runs [`pkg/actions`](../pkg/actions) executor with DB-backed activity rows |
-| `fleuve-ui` | Serves [`pkg/uibackend`](../pkg/uibackend/api.go) JSON API + embedded static UI from [`pkg/uiembed`](../pkg/uiembed/embed.go) |
+| `fleuve-ui` | Reference binary from [`examples/ui_server`](../examples/ui_server); libraries [`pkg/uibackend`](../pkg/uibackend/handler.go) + [`pkg/uiembed`](../pkg/uiembed/embed.go) |
 
 Extend **`cmd/gateway`** and **`cmd/runner`** (or your own `main`) to register additional workflow types.
 

@@ -7,287 +7,323 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/doomervibe/fleuve-go/pkg/actions"
 	"github.com/doomervibe/fleuve-go/pkg/model"
 )
 
+// CommandParser is a function that parses a command from a JSON payload.
 type CommandParser func(cmdType string, payload map[string]any) (model.Command, error)
 
+// Repository defines the workflow repository operations needed by the gateway.
 type Repository interface {
-	CreateNew(ctx context.Context, cmd model.Command, id string, tags []string) (*model.StoredState, error)
 	ProcessCommand(ctx context.Context, id string, cmd model.Command) (*model.StoredState, []model.Event, *model.Rejection)
+	CreateNew(ctx context.Context, cmd model.Command, id string, tags []string) (*model.StoredState, error)
 	PauseWorkflow(ctx context.Context, id string, reason string) (*model.StoredState, *model.Rejection)
 	ResumeWorkflow(ctx context.Context, id string) (*model.StoredState, *model.Rejection)
-	CancelWorkflow(ctx context.Context, id string, reason string, actionExecutor *actions.ActionExecutor) (*model.StoredState, *model.Rejection)
+	CancelWorkflow(ctx context.Context, id string, reason string) (*model.StoredState, *model.Rejection)
 }
 
-type FleuveCommandGateway struct {
-	repos          map[string]Repository
-	parsers        map[string]CommandParser
-	workflows      map[string]model.Workflow
-	actionExecutor *actions.ActionExecutor
+// Gateway provides an HTTP API for workflow commands.
+type Gateway struct {
+	repos           map[string]Repository
+	parsers         map[string]CommandParser
+	workflows       map[string]model.Workflow
+	actionExecutors map[string]*actions.ActionExecutor
 }
 
-func NewFleuveCommandGateway() *FleuveCommandGateway {
-	return &FleuveCommandGateway{
-		repos:     make(map[string]Repository),
-		parsers:   make(map[string]CommandParser),
-		workflows: make(map[string]model.Workflow),
+// NewGateway creates a new Gateway instance.
+func NewGateway() *Gateway {
+	return &Gateway{
+		repos:           make(map[string]Repository),
+		parsers:         make(map[string]CommandParser),
+		workflows:       make(map[string]model.Workflow),
+		actionExecutors: make(map[string]*actions.ActionExecutor),
 	}
 }
 
-func (g *FleuveCommandGateway) RegisterWorkflowType(workflowType string, repo Repository, parser CommandParser) {
-	g.repos[workflowType] = repo
-	g.parsers[workflowType] = parser
+// RegisterWorkflowType registers a workflow type with its repository, command parser,
+// workflow definition, and optional action executor.
+func (g *Gateway) RegisterWorkflowType(
+	name string,
+	repo Repository,
+	parser CommandParser,
+	workflow model.Workflow,
+	actionExecutor *actions.ActionExecutor,
+) {
+	g.repos[name] = repo
+	g.parsers[name] = parser
+	g.workflows[name] = workflow
+	if actionExecutor != nil {
+		g.actionExecutors[name] = actionExecutor
+	}
 }
 
-// RegisterWorkflowModel registers the workflow implementation for a type (required for failed-action retry).
-func (g *FleuveCommandGateway) RegisterWorkflowModel(workflowType string, wf model.Workflow) {
-	g.workflows[workflowType] = wf
-}
-
-func (g *FleuveCommandGateway) SetActionExecutor(executor *actions.ActionExecutor) {
-	g.actionExecutor = executor
-}
-
-func (g *FleuveCommandGateway) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /commands/{workflow_type}", g.createWorkflow)
-	mux.HandleFunc("POST /commands/{workflow_type}/{workflow_id}", g.processCommand)
-	mux.HandleFunc("POST /commands/{workflow_type}/{workflow_id}/pause", g.pauseWorkflow)
-	mux.HandleFunc("POST /commands/{workflow_type}/{workflow_id}/resume", g.resumeWorkflow)
-	mux.HandleFunc("POST /commands/{workflow_type}/{workflow_id}/cancel", g.cancelWorkflow)
-	mux.HandleFunc("POST /commands/{workflow_type}/{workflow_id}/retry/{event_number}", g.retryFailedAction)
-}
-
-type CreateWorkflowRequest struct {
-	WorkflowID  string         `json:"workflow_id"`
+// commandRequest represents the JSON request body for command endpoints.
+type commandRequest struct {
 	CommandType string         `json:"command_type"`
 	Payload     map[string]any `json:"payload"`
+	WorkflowID  string         `json:"workflow_id,omitempty"`
 }
 
-type ProcessCommandRequest struct {
-	CommandType string         `json:"command_type"`
-	Payload     map[string]any `json:"payload"`
+// lifecycleRequest represents the JSON request body for lifecycle endpoints.
+type lifecycleRequest struct {
+	Reason string `json:"reason,omitempty"`
 }
 
-type CommandResponse struct {
-	Status      string `json:"status"`
-	WorkflowID  string `json:"workflow_id,omitempty"`
-	Version     int64  `json:"version,omitempty"`
-	EventsCount int    `json:"events_count,omitempty"`
-	Message     string `json:"message,omitempty"`
-}
-
-func (g *FleuveCommandGateway) createWorkflow(w http.ResponseWriter, r *http.Request) {
-	workflowType := r.PathValue("workflow_type")
-	repo, ok := g.repos[workflowType]
-	if !ok {
-		writeError(w, http.StatusNotFound, "unknown workflow type: "+workflowType)
+// ServeHTTP implements http.Handler for the Gateway.
+func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	path := strings.TrimPrefix(r.URL.Path, "/")
+	path = strings.TrimSuffix(path, "/")
+	parts := strings.Split(path, "/")
+
+	// All routes start with "commands"
+	if len(parts) < 2 || parts[0] != "commands" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+
+	workflowType := parts[1]
+
+	// Check if workflow type is registered
+	if _, ok := g.repos[workflowType]; !ok {
+		http.Error(w, "unknown workflow type", http.StatusNotFound)
+		return
+	}
+
+	switch {
+	case len(parts) == 2:
+		// POST /commands/{workflow_type} - Create new workflow
+		g.handleCreate(w, r, workflowType)
+
+	case len(parts) == 3:
+		// POST /commands/{workflow_type}/{workflow_id} - Process command
+		g.handleCommand(w, r, workflowType, parts[2])
+
+	case len(parts) == 4:
+		switch parts[3] {
+		case "pause":
+			// POST /commands/{workflow_type}/{workflow_id}/pause
+			g.handlePause(w, r, workflowType, parts[2])
+		case "resume":
+			// POST /commands/{workflow_type}/{workflow_id}/resume
+			g.handleResume(w, r, workflowType, parts[2])
+		case "cancel":
+			// POST /commands/{workflow_type}/{workflow_id}/cancel
+			g.handleCancel(w, r, workflowType, parts[2])
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+
+	case len(parts) == 5 && parts[3] == "retry":
+		// POST /commands/{workflow_type}/{workflow_id}/retry/{event_number}
+		g.handleRetry(w, r, workflowType, parts[2], parts[4])
+
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// handleCreate handles POST /commands/{workflow_type}
+func (g *Gateway) handleCreate(w http.ResponseWriter, r *http.Request, workflowType string) {
 	parser, ok := g.parsers[workflowType]
 	if !ok {
-		writeError(w, http.StatusNotImplemented, "no command parser for workflow type: "+workflowType)
+		http.Error(w, "no command parser registered", http.StatusNotImplemented)
 		return
 	}
 
-	var req CreateWorkflowRequest
+	var req commandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	if req.WorkflowID == "" {
-		writeError(w, http.StatusBadRequest, "workflow_id is required")
+	if req.CommandType == "" {
+		http.Error(w, "command_type is required", http.StatusBadRequest)
 		return
 	}
 
 	cmd, err := parser(req.CommandType, req.Payload)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		http.Error(w, fmt.Sprintf("failed to parse command: %v", err), http.StatusBadRequest)
 		return
 	}
 
+	repo := g.repos[workflowType]
 	state, err := repo.CreateNew(r.Context(), cmd, req.WorkflowID, nil)
 	if err != nil {
-		var exists *model.AlreadyExists
-		if errors.As(err, &exists) {
-			writeError(w, http.StatusConflict, exists.Msg)
-			return
-		}
-		var rej *model.Rejection
-		if errors.As(err, &rej) {
-			writeError(w, http.StatusBadRequest, rej.Msg)
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+		g.writeError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, CommandResponse{
-		Status:     "ok",
-		WorkflowID: state.ID,
-		Version:    state.Version,
-	})
+	g.writeSuccess(w, state)
 }
 
-func (g *FleuveCommandGateway) processCommand(w http.ResponseWriter, r *http.Request) {
-	workflowType := r.PathValue("workflow_type")
-	workflowID := r.PathValue("workflow_id")
-
-	repo, ok := g.repos[workflowType]
-	if !ok {
-		writeError(w, http.StatusNotFound, "unknown workflow type: "+workflowType)
-		return
-	}
-
+// handleCommand handles POST /commands/{workflow_type}/{workflow_id}
+func (g *Gateway) handleCommand(w http.ResponseWriter, r *http.Request, workflowType, workflowID string) {
 	parser, ok := g.parsers[workflowType]
 	if !ok {
-		writeError(w, http.StatusNotImplemented, "no command parser for workflow type: "+workflowType)
+		http.Error(w, "no command parser registered", http.StatusNotImplemented)
 		return
 	}
 
-	var req ProcessCommandRequest
+	var req commandRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if req.CommandType == "" {
+		http.Error(w, "command_type is required", http.StatusBadRequest)
 		return
 	}
 
 	cmd, err := parser(req.CommandType, req.Payload)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		http.Error(w, fmt.Sprintf("failed to parse command: %v", err), http.StatusBadRequest)
 		return
 	}
 
+	repo := g.repos[workflowType]
 	state, events, rejection := repo.ProcessCommand(r.Context(), workflowID, cmd)
 	if rejection != nil {
-		writeError(w, http.StatusBadRequest, rejection.Msg)
+		http.Error(w, rejection.Msg, http.StatusBadRequest)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, CommandResponse{
-		Status:      "ok",
-		WorkflowID:  state.ID,
-		Version:     state.Version,
-		EventsCount: len(events),
-	})
+	g.writeSuccessWithEvents(w, state, events)
 }
 
-func (g *FleuveCommandGateway) pauseWorkflow(w http.ResponseWriter, r *http.Request) {
-	workflowType := r.PathValue("workflow_type")
-	workflowID := r.PathValue("workflow_id")
-	reason := r.URL.Query().Get("reason")
+// handlePause handles POST /commands/{workflow_type}/{workflow_id}/pause
+func (g *Gateway) handlePause(w http.ResponseWriter, r *http.Request, workflowType, workflowID string) {
+	var req lifecycleRequest
+	// Body is optional for pause
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	repo, ok := g.repos[workflowType]
-	if !ok {
-		writeError(w, http.StatusNotFound, "unknown workflow type: "+workflowType)
-		return
-	}
-
-	_, rejection := repo.PauseWorkflow(r.Context(), workflowID, reason)
+	repo := g.repos[workflowType]
+	state, rejection := repo.PauseWorkflow(r.Context(), workflowID, req.Reason)
 	if rejection != nil {
-		writeError(w, http.StatusBadRequest, rejection.Msg)
+		http.Error(w, rejection.Msg, http.StatusBadRequest)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, CommandResponse{
-		Status:  "ok",
-		Message: "Workflow paused",
-	})
+	g.writeSuccess(w, state)
 }
 
-func (g *FleuveCommandGateway) resumeWorkflow(w http.ResponseWriter, r *http.Request) {
-	workflowType := r.PathValue("workflow_type")
-	workflowID := r.PathValue("workflow_id")
-
-	repo, ok := g.repos[workflowType]
-	if !ok {
-		writeError(w, http.StatusNotFound, "unknown workflow type: "+workflowType)
-		return
-	}
-
-	_, rejection := repo.ResumeWorkflow(r.Context(), workflowID)
+// handleResume handles POST /commands/{workflow_type}/{workflow_id}/resume
+func (g *Gateway) handleResume(w http.ResponseWriter, r *http.Request, workflowType, workflowID string) {
+	repo := g.repos[workflowType]
+	state, rejection := repo.ResumeWorkflow(r.Context(), workflowID)
 	if rejection != nil {
-		writeError(w, http.StatusBadRequest, rejection.Msg)
+		http.Error(w, rejection.Msg, http.StatusBadRequest)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, CommandResponse{
-		Status:  "ok",
-		Message: "Workflow resumed",
-	})
+	g.writeSuccess(w, state)
 }
 
-func (g *FleuveCommandGateway) cancelWorkflow(w http.ResponseWriter, r *http.Request) {
-	workflowType := r.PathValue("workflow_type")
-	workflowID := r.PathValue("workflow_id")
-	reason := r.URL.Query().Get("reason")
+// handleCancel handles POST /commands/{workflow_type}/{workflow_id}/cancel
+func (g *Gateway) handleCancel(w http.ResponseWriter, r *http.Request, workflowType, workflowID string) {
+	var req lifecycleRequest
+	// Body is optional for cancel
+	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	repo, ok := g.repos[workflowType]
-	if !ok {
-		writeError(w, http.StatusNotFound, "unknown workflow type: "+workflowType)
-		return
-	}
-
-	_, rejection := repo.CancelWorkflow(r.Context(), workflowID, reason, g.actionExecutor)
+	repo := g.repos[workflowType]
+	state, rejection := repo.CancelWorkflow(r.Context(), workflowID, req.Reason)
 	if rejection != nil {
-		writeError(w, http.StatusBadRequest, rejection.Msg)
+		http.Error(w, rejection.Msg, http.StatusBadRequest)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, CommandResponse{
-		Status:  "ok",
-		Message: "Workflow cancelled",
-	})
+	g.writeSuccess(w, state)
 }
 
-func (g *FleuveCommandGateway) retryFailedAction(w http.ResponseWriter, r *http.Request) {
-	if g.actionExecutor == nil {
-		writeError(w, http.StatusNotImplemented, "retry not available: action_executor not configured")
+// handleRetry handles POST /commands/{workflow_type}/{workflow_id}/retry/{event_number}
+func (g *Gateway) handleRetry(w http.ResponseWriter, r *http.Request, workflowType, workflowID, eventNumberStr string) {
+	executor, ok := g.actionExecutors[workflowType]
+	if !ok {
+		http.Error(w, "no action executor registered", http.StatusNotImplemented)
 		return
 	}
 
-	workflowType := r.PathValue("workflow_type")
-	wf, ok := g.workflows[workflowType]
-	if !ok || wf == nil {
-		writeError(w, http.StatusBadRequest, "unknown workflow type for retry: "+workflowType)
-		return
-	}
-
-	workflowID := r.PathValue("workflow_id")
-	eventNumberStr := r.PathValue("event_number")
-	eventNumber, err := strconv.ParseInt(eventNumberStr, 10, 64)
+	eventNumber, err := strconv.Atoi(eventNumberStr)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid event_number")
+		http.Error(w, "invalid event number", http.StatusBadRequest)
 		return
 	}
 
-	if err := g.actionExecutor.RequeueFailedAction(r.Context(), workflowType, workflowID, eventNumber, wf); err != nil {
-		switch {
-		case errors.Is(err, actions.ErrActivityNotFound):
-			writeError(w, http.StatusNotFound, err.Error())
-		case errors.Is(err, actions.ErrActivityNotFailed):
-			writeError(w, http.StatusConflict, err.Error())
-		default:
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("retry failed: %v", err))
+	// Create a ConsumedEvent for the retry
+	// The actual event data will be loaded by the executor from the activity record
+	consumedEvent := &model.ConsumedEvent{
+		WorkflowID:   workflowID,
+		WorkflowType: workflowType,
+		EventNo:      int64(eventNumber),
+	}
+
+	if err := executor.ExecuteAction(consumedEvent); err != nil {
+		if errors.Is(err, actions.ErrAlreadyRunning) {
+			http.Error(w, "action is already running", http.StatusConflict)
+			return
 		}
+		if errors.Is(err, actions.ErrActionCompleted) {
+			http.Error(w, "action already completed", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, fmt.Sprintf("failed to retry action: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, CommandResponse{
-		Status:  "ok",
-		Message: "Action re-queued for retry",
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":       "retry_initiated",
+		"workflow_id":  workflowID,
+		"event_number": eventNumber,
 	})
 }
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+// writeError writes an appropriate error response based on the error type.
+func (g *Gateway) writeError(w http.ResponseWriter, err error) {
+	var alreadyExists *model.AlreadyExists
+	if errors.As(err, &alreadyExists) {
+		http.Error(w, alreadyExists.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var rejection *model.Rejection
+	if errors.As(err, &rejection) {
+		http.Error(w, rejection.Msg, http.StatusBadRequest)
+		return
+	}
+
+	http.Error(w, fmt.Sprintf("internal error: %v", err), http.StatusInternalServerError)
 }
 
-func writeError(w http.ResponseWriter, status int, detail string) {
-	writeJSON(w, status, map[string]string{"detail": detail})
+// writeSuccess writes a success response with the stored state.
+func (g *Gateway) writeSuccess(w http.ResponseWriter, state *model.StoredState) {
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"workflow_id": state.ID,
+		"version":     state.Version,
+	})
+}
+
+// writeSuccessWithEvents writes a success response with the stored state and events.
+func (g *Gateway) writeSuccessWithEvents(w http.ResponseWriter, state *model.StoredState, events []model.Event) {
+	eventTypes := make([]string, len(events))
+	for i, e := range events {
+		eventTypes[i] = e.Type()
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"workflow_id": state.ID,
+		"version":     state.Version,
+		"events":      eventTypes,
+	})
 }

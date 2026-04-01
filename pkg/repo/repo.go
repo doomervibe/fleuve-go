@@ -2,61 +2,123 @@ package repo
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/doomervibe/fleuve-go/pkg/actions"
-	"github.com/doomervibe/fleuve-go/pkg/delay"
 	"github.com/doomervibe/fleuve-go/pkg/model"
-	"github.com/doomervibe/fleuve-go/pkg/postgres"
 )
 
-type SyncDBHandler func(ctx context.Context, tx *sql.Tx, workflowID string, oldState, newState model.State, events []model.Event) error
+// SyncDBHandler is called in the same transaction as event insertion.
+// Used for denormalized DB updates that must be consistent with events.
+type SyncDBHandler func(ctx context.Context, tx pgx.Tx, workflowID string, oldState, newState model.State, events []model.Event) error
 
-// Repo is the database/sql-backed workflow repository (distinct from PGXRepo).
+// EventParser deserializes raw JSON into an Event based on event type.
+type EventParser func(eventType string, raw json.RawMessage) (model.Event, error)
+
+// Repo is the pgx-backed workflow repository implementing event sourcing.
+// It provides transactional command processing with the Outbox pattern.
 type Repo struct {
-	db                 *sql.DB
+	pool               *pgxpool.Pool
 	workflowType       string
 	workflow           model.Workflow
 	es                 EphemeralStorage
-	dbWorkflowMetadata string
+	eventParser        EventParser
 	syncDBHandler      SyncDBHandler
-	dbSnapshotModel    string
 	snapshotInterval   int
-	dbSearchAttributes string
+	snapshotTable      string
+	eventsTable        string
+	subscriptionsTable string
+	externalSubsTable  string
+	delayScheduleTable string
+	workflowMetaTable  string
 	namespace          *string
+	trustCache         bool
 }
 
+// RepoOption is a functional option for Repo configuration.
 type RepoOption func(*Repo)
 
+// WithNamespace sets the namespace for multi-tenant filtering.
 func WithNamespace(ns string) RepoOption {
 	return func(r *Repo) { r.namespace = &ns }
 }
 
+// WithSnapshotInterval enables snapshotting at the given interval.
+// 0 = disabled.
 func WithSnapshotInterval(interval int) RepoOption {
 	return func(r *Repo) { r.snapshotInterval = interval }
 }
 
+// WithSnapshotTable sets the snapshot table name.
+func WithSnapshotTable(table string) RepoOption {
+	return func(r *Repo) { r.snapshotTable = table }
+}
+
+// WithEventsTable sets the events table name.
+func WithEventsTable(table string) RepoOption {
+	return func(r *Repo) { r.eventsTable = table }
+}
+
+// WithSyncDBHandler sets the sync DB handler for denormalized updates.
 func WithSyncDBHandler(handler SyncDBHandler) RepoOption {
 	return func(r *Repo) { r.syncDBHandler = handler }
 }
 
+// WithTrustCache disables DB version check on cache hit.
+// Safe ONLY when this runner is the sole writer for its partition.
+func WithTrustCache(trust bool) RepoOption {
+	return func(r *Repo) { r.trustCache = trust }
+}
+
+// WithEventParser sets the event deserialization function.
+func WithEventParser(parser EventParser) RepoOption {
+	return func(r *Repo) { r.eventParser = parser }
+}
+
+// WithSubscriptionsTable sets the subscriptions table name.
+func WithSubscriptionsTable(table string) RepoOption {
+	return func(r *Repo) { r.subscriptionsTable = table }
+}
+
+// WithExternalSubscriptionsTable sets the external_subscriptions table name.
+func WithExternalSubscriptionsTable(table string) RepoOption {
+	return func(r *Repo) { r.externalSubsTable = table }
+}
+
+// WithDelayScheduleTable sets the delay_schedule table name.
+func WithDelayScheduleTable(table string) RepoOption {
+	return func(r *Repo) { r.delayScheduleTable = table }
+}
+
+// WithWorkflowMetaTable sets the workflow_metadata table name.
+func WithWorkflowMetaTable(table string) RepoOption {
+	return func(r *Repo) { r.workflowMetaTable = table }
+}
+
+// NewRepo creates a new workflow repository.
 func NewRepo(
-	db *sql.DB,
+	pool *pgxpool.Pool,
 	workflowType string,
 	workflow model.Workflow,
 	es EphemeralStorage,
 	opts ...RepoOption,
 ) *Repo {
 	r := &Repo{
-		db:           db,
-		workflowType: workflowType,
-		workflow:     workflow,
-		es:           es,
+		pool:               pool,
+		workflowType:       workflowType,
+		workflow:           workflow,
+		es:                 es,
+		eventsTable:        "stored_events",
+		snapshotTable:      "snapshots",
+		subscriptionsTable: "subscriptions",
+		externalSubsTable:  "external_subscriptions",
+		delayScheduleTable: "delay_schedules",
+		workflowMetaTable:  "workflow_metadata",
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -64,536 +126,904 @@ func NewRepo(
 	return r
 }
 
-func (r *Repo) CreateNew(ctx context.Context, cmd model.Command, id string, tags []string) (*model.StoredState, error) {
-	events, rejection := r.workflow.Decide(nil, cmd)
-	if rejection != nil {
-		return nil, rejection
-	}
-	if len(events) == 0 {
-		return nil, &model.Rejection{Msg: "Cannot create workflow with no events"}
-	}
-
-	state := r.workflow.Evolve(nil, events[0])
-	for _, e := range events[1:] {
-		state = r.workflow.Evolve(state, e)
-	}
-
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for i, e := range events {
-		if len(tags) > 0 {
-			mergeWorkflowTagsIntoMetadata(e, tags)
-		}
-		bodyBytes, _ := json.Marshal(e)
-		metaBytes, _ := json.Marshal(e.GetMetadata())
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO stored_events (workflow_id, workflow_version, namespace, event_type, workflow_type, schema_version, body, at, metadata, pushed)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
-		`, id, i+1, r.namespaceArg(), e.GetType(), r.workflowType, r.workflow.SchemaVersion(), bodyBytes, time.Now(), metaBytes)
-		if isUniqueViolation(err) {
-			return nil, &model.AlreadyExists{Rejection: model.Rejection{Msg: "workflow already exists"}}
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := r.handleSyncEventTx(ctx, tx, id, int64(i+1), e); err != nil {
-			return nil, err
-		}
-	}
-
-	if len(tags) > 0 && r.dbWorkflowMetadata != "" {
-		_, err := tx.ExecContext(ctx, `
-			INSERT INTO workflow_metadata (workflow_id, workflow_type, tags, created_at)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (workflow_id) DO UPDATE SET tags = EXCLUDED.tags
-		`, id, r.workflowType, pq.Array(tags), time.Now())
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if r.syncDBHandler != nil {
-		if err := r.syncDBHandler(ctx, tx, id, nil, state, events); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
-	ss := &model.StoredState{ID: id, Version: int64(len(events)), State: state}
-	if !r.workflow.IsFinalEvent(events[len(events)-1]) {
-		_ = r.es.PutState(ctx, ss)
-	}
-	r.maybeSaveSnapshot(ctx, id, ss.Version, ss.State)
-	return ss, nil
+// WorkflowType returns the workflow type name this repository was constructed with.
+func (r *Repo) WorkflowType() string {
+	return r.workflowType
 }
 
+// ProcessCommand processes a command for an existing workflow.
+// This is THE core method implementing event sourcing with optimistic concurrency.
+//
+// Full flow:
+//  1. Acquire row-level lock on version=1 event for this workflow
+//  2. Load current state (cache or DB)
+//  3. Lifecycle check (paused/cancelled → rejection)
+//  4. Call decide() → get events
+//  5. Call evolve_() to compute new state
+//  6. Handle sync events (subscriptions, schedules, etc.)
+//  7. Call sync_db handler if configured
+//  8. Inject workflow tags into event metadata
+//  9. INSERT all events
+//  10. Maybe snapshot
+//  11. Update ephemeral cache
+//
+// Retries on IntegrityError (concurrent command from another process).
 func (r *Repo) ProcessCommand(ctx context.Context, id string, cmd model.Command) (*model.StoredState, []model.Event, *model.Rejection) {
-	for {
-		tx, err := r.db.BeginTx(ctx, nil)
-		if err != nil {
-			return nil, nil, &model.Rejection{Msg: err.Error()}
-		}
+	const maxRetries = 100
 
+	for retry := 0; retry < maxRetries; retry++ {
+		tx, err := r.pool.Begin(ctx)
+		if err != nil {
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
+		}
+		defer tx.Rollback(ctx)
+
+		// Step 1: Acquire row-level lock on version=1 event
 		var lockKey int64
-		err = tx.QueryRowContext(ctx, `
-			SELECT global_id FROM stored_events WHERE workflow_id = $1 AND workflow_version = 1 FOR UPDATE
-		`, id).Scan(&lockKey)
-		if err == sql.ErrNoRows {
-			_ = tx.Rollback()
+		err = tx.QueryRow(ctx,
+			fmt.Sprintf("SELECT global_id FROM %s WHERE workflow_id = $1 AND workflow_version = 1 FOR UPDATE", r.eventsTable),
+			id,
+		).Scan(&lockKey)
+		if err == pgx.ErrNoRows {
 			return nil, nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
 		}
 		if err != nil {
-			_ = tx.Rollback()
-			return nil, nil, &model.Rejection{Msg: err.Error()}
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to acquire lock: %v", err)}
 		}
 
-		state, err := r.loadStateTx(ctx, tx, id, nil)
+		// Step 2: Load current state
+		state, err := r.getCurrentStateTx(ctx, tx, id)
 		if err != nil {
-			_ = tx.Rollback()
-			return nil, nil, &model.Rejection{Msg: err.Error()}
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}
 		}
-		if state == nil {
-			_ = tx.Rollback()
+		if state == nil || state.State == nil {
 			return nil, nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
 		}
-		if state.State == nil {
-			_ = tx.Rollback()
-			return nil, nil, &model.Rejection{Msg: "Workflow has completed"}
-		}
 
-		lifecycle := model.LifecycleActive
-		if s, ok := state.State.(interface{ GetLifecycle() model.LifecycleState }); ok {
-			lifecycle = s.GetLifecycle()
-		}
+		// Step 3: Lifecycle check
+		lifecycle := state.State.GetLifecycle()
 		if lifecycle == model.LifecyclePaused {
-			_ = tx.Rollback()
-			return nil, nil, &model.Rejection{Msg: "Workflow is paused"}
+			return nil, nil, &model.Rejection{Msg: (&model.WorkflowPaused{}).Error()}
 		}
 		if lifecycle == model.LifecycleCanceled {
-			_ = tx.Rollback()
-			return nil, nil, &model.Rejection{Msg: "Workflow is cancelled"}
+			return nil, nil, &model.Rejection{Msg: (&model.WorkflowCanceled{}).Error()}
 		}
 
+		// Step 4: Call decide()
 		events, rejection := r.workflow.Decide(state.State, cmd)
 		if rejection != nil {
-			_ = tx.Rollback()
 			return nil, nil, rejection
 		}
 		if len(events) == 0 {
-			_ = tx.Rollback()
+			// No-op - return current state unchanged
 			return state, nil, nil
 		}
 
-		newState := state.State
-		for _, e := range events {
-			newState = r.workflow.Evolve(newState, e)
+		// Step 5: Evolve to compute new state
+		newState := model.EvolveAll(r.workflow, state.State, events)
+		newVersion := state.Version + int64(len(events))
+
+		// Step 6: Handle sync events BEFORE inserting events
+		if err := r.handleSyncEventsTx(ctx, tx, id, state.Version, events); err != nil {
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to handle sync events: %v", err)}
 		}
 
-		wfTags := r.loadWorkflowTagsTx(ctx, tx, id)
-		for i, e := range events {
-			mergeWorkflowTagsIntoMetadata(e, wfTags)
-			bodyBytes, _ := json.Marshal(e)
-			metaBytes, _ := json.Marshal(e.GetMetadata())
-			nextVer := state.Version + int64(i) + 1
-			_, err := tx.ExecContext(ctx, `
-				INSERT INTO stored_events (workflow_id, workflow_version, namespace, event_type, workflow_type, schema_version, body, at, metadata, pushed)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
-			`, id, nextVer, r.namespaceArg(), e.GetType(), r.workflowType, r.workflow.SchemaVersion(), bodyBytes, time.Now(), metaBytes)
-			if isUniqueViolation(err) {
-				_ = tx.Rollback()
-				continue
-			}
-			if err != nil {
-				_ = tx.Rollback()
-				return nil, nil, &model.Rejection{Msg: err.Error()}
-			}
-			if err := r.handleSyncEventTx(ctx, tx, id, nextVer, e); err != nil {
-				_ = tx.Rollback()
-				return nil, nil, &model.Rejection{Msg: err.Error()}
-			}
-		}
-
+		// Step 7: Call sync_db handler if configured
 		if r.syncDBHandler != nil {
 			if err := r.syncDBHandler(ctx, tx, id, state.State, newState, events); err != nil {
-				_ = tx.Rollback()
-				return nil, nil, &model.Rejection{Msg: err.Error()}
+				return nil, nil, &model.Rejection{Msg: fmt.Sprintf("sync_db handler failed: %v", err)}
 			}
 		}
 
-		if err := tx.Commit(); err != nil {
+		// Step 8: Inject workflow tags into event metadata
+		wfTags, _ := r.loadWorkflowTagsTx(ctx, tx, id)
+		for _, e := range events {
+			model.SetWorkflowTagsInMetadata(e, wfTags)
+		}
+
+		// Step 9: INSERT all events
+		for i, e := range events {
+			eventVersion := state.Version + int64(i) + 1
+			if err := r.insertEventTx(ctx, tx, id, eventVersion, e); err != nil {
+				if isUniqueViolation(err) {
+					// Concurrent command - retry
+					break
+				}
+				return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert event: %v", err)}
+			}
+			// Check if we broke out due to unique violation
+			if i < len(events)-1 {
+				continue // Will be caught by the next iteration
+			}
+		}
+
+		// Verify all events were inserted by checking the last one
+		var lastInsertedVersion int64
+		err = tx.QueryRow(ctx,
+			fmt.Sprintf("SELECT workflow_version FROM %s WHERE workflow_id = $1 ORDER BY workflow_version DESC LIMIT 1", r.eventsTable),
+			id,
+		).Scan(&lastInsertedVersion)
+		if err != nil {
+			if isUniqueViolation(err) || err == pgx.ErrNoRows {
+				continue // Retry
+			}
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to verify insert: %v", err)}
+		}
+		if lastInsertedVersion < newVersion {
+			continue // Some events weren't inserted - retry
+		}
+
+		// Step 10: Maybe snapshot
+		if err := r.maybeSnapshotTx(ctx, tx, id, newState, newVersion); err != nil {
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to snapshot: %v", err)}
+		}
+
+		// Commit
+		if err := tx.Commit(ctx); err != nil {
 			if isUniqueViolation(err) {
-				continue
+				continue // Retry
 			}
-			return nil, nil, &model.Rejection{Msg: err.Error()}
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to commit: %v", err)}
 		}
 
-		newVersion := state.Version + int64(len(events))
+		// Step 11: Update ephemeral cache
 		newSS := &model.StoredState{ID: id, Version: newVersion, State: newState}
 
-		if r.workflow.IsFinalEvent(events[len(events)-1]) {
+		// Check if final event (but NOT EvSystemCancel)
+		lastEvent := events[len(events)-1]
+		if model.IsTerminalState(r.workflow, lastEvent) {
 			_ = r.es.RemoveState(ctx, id)
 		} else {
 			_ = r.es.PutState(ctx, newSS)
 		}
 
-		r.maybeSaveSnapshot(ctx, id, newVersion, newState)
 		return newSS, events, nil
 	}
+
+	return nil, nil, &model.Rejection{Msg: "max retries exceeded for concurrent command processing"}
 }
 
+// CreateNew creates a new workflow with the given ID and initial command.
+// No SELECT FOR UPDATE lock is needed since the workflow doesn't exist yet.
+// Uses IntegrityError on event INSERT as the concurrency guard.
+func (r *Repo) CreateNew(ctx context.Context, cmd model.Command, id string, tags []string) (*model.StoredState, error) {
+	// Step 1: Call decide with nil state
+	events, rejection := r.workflow.Decide(nil, cmd)
+	if rejection != nil {
+		return nil, rejection
+	}
+	if len(events) == 0 {
+		return nil, &model.Rejection{Msg: "cannot create workflow with no events"}
+	}
+
+	// Step 2: Evolve to compute initial state
+	state := model.EvolveAll(r.workflow, nil, events)
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Step 3: Insert workflow metadata if tags provided
+	if len(tags) > 0 {
+		_, err := tx.Exec(ctx,
+			fmt.Sprintf(`INSERT INTO %s (workflow_id, workflow_type, tags, created_at)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (workflow_id) DO UPDATE SET tags = EXCLUDED.tags`, r.workflowMetaTable),
+			id, r.workflowType, tags, time.Now().UTC(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to insert workflow metadata: %w", err)
+		}
+	}
+
+	// Step 4: Handle sync events with base_version=0
+	if err := r.handleSyncEventsTx(ctx, tx, id, 0, events); err != nil {
+		return nil, fmt.Errorf("failed to handle sync events: %w", err)
+	}
+
+	// Step 5: Call sync_db handler if configured
+	if r.syncDBHandler != nil {
+		if err := r.syncDBHandler(ctx, tx, id, nil, state, events); err != nil {
+			return nil, fmt.Errorf("sync_db handler failed: %w", err)
+		}
+	}
+
+	// Step 6: Inject workflow tags and insert events
+	for i, e := range events {
+		model.SetWorkflowTagsInMetadata(e, tags)
+		if err := r.insertEventTx(ctx, tx, id, int64(i+1), e); err != nil {
+			if isUniqueViolation(err) {
+				return nil, &model.AlreadyExists{}
+			}
+			return nil, fmt.Errorf("failed to insert event at version %d: %w", i+1, err)
+		}
+	}
+
+	// Step 7: Maybe snapshot
+	newVersion := int64(len(events))
+	if err := r.maybeSnapshotTx(ctx, tx, id, state, newVersion); err != nil {
+		return nil, fmt.Errorf("failed to snapshot: %w", err)
+	}
+
+	// Commit
+	if err := tx.Commit(ctx); err != nil {
+		if isUniqueViolation(err) {
+			return nil, &model.AlreadyExists{}
+		}
+		return nil, fmt.Errorf("failed to commit: %w", err)
+	}
+
+	// Update ephemeral cache
+	ss := &model.StoredState{ID: id, Version: newVersion, State: state}
+	lastEvent := events[len(events)-1]
+	if !model.IsTerminalState(r.workflow, lastEvent) {
+		_ = r.es.PutState(ctx, ss)
+	}
+
+	return ss, nil
+}
+
+// PauseWorkflow pauses a workflow, preventing command processing.
 func (r *Repo) PauseWorkflow(ctx context.Context, id string, reason string) (*model.StoredState, *model.Rejection) {
-	state, err := r.GetCurrentState(ctx, id)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, &model.Rejection{Msg: err.Error()}
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
+	}
+	defer tx.Rollback(ctx)
+
+	state, err := r.loadStateTx(ctx, tx, id, nil)
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}
+	}
+	if state == nil || state.State == nil {
+		return nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
 	}
 
-	lifecycle := model.LifecycleActive
-	if s, ok := state.State.(interface{ GetLifecycle() model.LifecycleState }); ok {
-		lifecycle = s.GetLifecycle()
-	}
+	lifecycle := state.State.GetLifecycle()
 	if lifecycle == model.LifecyclePaused {
-		return nil, &model.Rejection{Msg: "Workflow is already paused"}
+		return nil, &model.Rejection{Msg: "workflow is already paused"}
 	}
 	if lifecycle == model.LifecycleCanceled {
-		return nil, &model.Rejection{Msg: "Workflow is cancelled"}
+		return nil, &model.Rejection{Msg: "workflow is cancelled"}
 	}
 
-	ev := &model.EvSystemPause{Reason: reason}
-	bodyBytes, _ := json.Marshal(ev)
-	metaBytes, _ := json.Marshal(ev.GetMetadata())
+	event := &model.EvSystemPause{Reason: reason}
+	newState := model.Evolve(r.workflow, state.State, event)
+	newVersion := state.Version + 1
 
-	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO stored_events (workflow_id, workflow_version, namespace, event_type, workflow_type, schema_version, body, at, metadata, pushed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
-	`, id, state.Version+1, r.namespaceArg(), ev.GetType(), r.workflowType, r.workflow.SchemaVersion(), bodyBytes, time.Now(), metaBytes)
-	if err != nil {
-		return nil, &model.Rejection{Msg: err.Error()}
+	if err := r.insertEventTx(ctx, tx, id, newVersion, event); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert event: %v", err)}
 	}
 
-	newSS := &model.StoredState{ID: id, Version: state.Version + 1, State: state.State}
+	if err := r.maybeSnapshotTx(ctx, tx, id, newState, newVersion); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to snapshot: %v", err)}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to commit: %v", err)}
+	}
+
+	newSS := &model.StoredState{ID: id, Version: newVersion, State: newState}
 	_ = r.es.PutState(ctx, newSS)
 	return newSS, nil
 }
 
+// ResumeWorkflow resumes a paused workflow.
 func (r *Repo) ResumeWorkflow(ctx context.Context, id string) (*model.StoredState, *model.Rejection) {
-	state, err := r.GetCurrentState(ctx, id)
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, &model.Rejection{Msg: err.Error()}
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
+	}
+	defer tx.Rollback(ctx)
+
+	state, err := r.loadStateTx(ctx, tx, id, nil)
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}
+	}
+	if state == nil || state.State == nil {
+		return nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
 	}
 
-	lifecycle := model.LifecycleActive
-	if s, ok := state.State.(interface{ GetLifecycle() model.LifecycleState }); ok {
-		lifecycle = s.GetLifecycle()
-	}
+	lifecycle := state.State.GetLifecycle()
 	if lifecycle != model.LifecyclePaused {
-		return nil, &model.Rejection{Msg: "Workflow is not paused"}
+		return nil, &model.Rejection{Msg: "workflow is not paused"}
 	}
 
-	ev := &model.EvSystemResume{}
-	bodyBytes, _ := json.Marshal(ev)
-	metaBytes, _ := json.Marshal(ev.GetMetadata())
+	event := &model.EvSystemResume{}
+	newState := model.Evolve(r.workflow, state.State, event)
+	newVersion := state.Version + 1
 
-	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO stored_events (workflow_id, workflow_version, namespace, event_type, workflow_type, schema_version, body, at, metadata, pushed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
-	`, id, state.Version+1, r.namespaceArg(), ev.GetType(), r.workflowType, r.workflow.SchemaVersion(), bodyBytes, time.Now(), metaBytes)
-	if err != nil {
-		return nil, &model.Rejection{Msg: err.Error()}
+	if err := r.insertEventTx(ctx, tx, id, newVersion, event); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert event: %v", err)}
 	}
 
-	newSS := &model.StoredState{ID: id, Version: state.Version + 1, State: state.State}
+	if err := r.maybeSnapshotTx(ctx, tx, id, newState, newVersion); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to snapshot: %v", err)}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to commit: %v", err)}
+	}
+
+	newSS := &model.StoredState{ID: id, Version: newVersion, State: newState}
 	_ = r.es.PutState(ctx, newSS)
 	return newSS, nil
 }
 
-func (r *Repo) CancelWorkflow(ctx context.Context, id string, reason string, actionExecutor *actions.ActionExecutor) (*model.StoredState, *model.Rejection) {
-	state, err := r.GetCurrentState(ctx, id)
+// CancelWorkflow cancels a workflow and cleans up associated resources.
+func (r *Repo) CancelWorkflow(ctx context.Context, id string, reason string) (*model.StoredState, *model.Rejection) {
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, &model.Rejection{Msg: err.Error()}
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
+	}
+	defer tx.Rollback(ctx)
+
+	state, err := r.loadStateTx(ctx, tx, id, nil)
+	if err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}
+	}
+	if state == nil || state.State == nil {
+		return nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
 	}
 
-	lifecycle := model.LifecycleActive
-	if s, ok := state.State.(interface{ GetLifecycle() model.LifecycleState }); ok {
-		lifecycle = s.GetLifecycle()
-	}
+	lifecycle := state.State.GetLifecycle()
 	if lifecycle == model.LifecycleCanceled {
-		return nil, &model.Rejection{Msg: "Workflow is already cancelled"}
+		return nil, &model.Rejection{Msg: "workflow is already cancelled"}
 	}
 
-	if actionExecutor != nil {
-		actionExecutor.CancelWorkflowActions(id, nil)
-	}
-
-	_, _ = r.db.ExecContext(ctx, `DELETE FROM delay_schedules WHERE workflow_id = $1`, id)
-
-	ev := &model.EvSystemCancel{Reason: reason}
-	bodyBytes, _ := json.Marshal(ev)
-	metaBytes, _ := json.Marshal(ev.GetMetadata())
-
-	_, err = r.db.ExecContext(ctx, `
-		INSERT INTO stored_events (workflow_id, workflow_version, namespace, event_type, workflow_type, schema_version, body, at, metadata, pushed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)
-	`, id, state.Version+1, r.namespaceArg(), ev.GetType(), r.workflowType, r.workflow.SchemaVersion(), bodyBytes, time.Now(), metaBytes)
+	// Delete all delay schedules for this workflow
+	_, err = tx.Exec(ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE workflow_id = $1", r.delayScheduleTable),
+		id,
+	)
 	if err != nil {
-		return nil, &model.Rejection{Msg: err.Error()}
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to delete delay schedules: %v", err)}
 	}
 
-	newSS := &model.StoredState{ID: id, Version: state.Version + 1, State: state.State}
+	event := &model.EvSystemCancel{Reason: reason}
+	newState := model.Evolve(r.workflow, state.State, event)
+	newVersion := state.Version + 1
+
+	if err := r.insertEventTx(ctx, tx, id, newVersion, event); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert event: %v", err)}
+	}
+
+	if err := r.maybeSnapshotTx(ctx, tx, id, newState, newVersion); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to snapshot: %v", err)}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, &model.Rejection{Msg: fmt.Sprintf("failed to commit: %v", err)}
+	}
+
+	// ALWAYS remove from cache on cancel
 	_ = r.es.RemoveState(ctx, id)
+
+	newSS := &model.StoredState{ID: id, Version: newVersion, State: newState}
 	return newSS, nil
 }
 
-func (r *Repo) GetWorkflowTags(ctx context.Context, workflowID string) ([]string, error) {
-	if r.dbWorkflowMetadata == "" {
-		return nil, nil
+// ContinueAsNew resets event history while preserving state.
+// Used for long-running workflows to reduce storage.
+// Requires snapshotting to be enabled.
+func (r *Repo) ContinueAsNew(ctx context.Context, id string, newCmd model.Command, reason string, newWorkflowType string) (*model.StoredState, []model.Event, *model.Rejection) {
+	if r.snapshotInterval <= 0 {
+		return nil, nil, &model.Rejection{Msg: "continue_as_new requires snapshotting to be enabled"}
 	}
 
-	var tags pq.StringArray
-	err := r.db.QueryRowContext(ctx, `SELECT tags FROM workflow_metadata WHERE workflow_id = $1`, workflowID).Scan(&tags)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
 	}
-	return []string(tags), nil
+	defer tx.Rollback(ctx)
+
+	// Load current state
+	state, err := r.loadStateTx(ctx, tx, id, nil)
+	if err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}
+	}
+	if state == nil || state.State == nil {
+		return nil, nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
+	}
+
+	// Force UPSERT snapshot at current version
+	if err := r.upsertSnapshotTx(ctx, tx, id, state.State, state.Version); err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to force snapshot: %v", err)}
+	}
+
+	// Delete all events for this workflow
+	_, err = tx.Exec(ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE workflow_id = $1", r.eventsTable),
+		id,
+	)
+	if err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to delete events: %v", err)}
+	}
+
+	// Insert EvContinueAsNew marker event at version=1
+	event := &model.EvContinueAsNew{Reason: reason, NewWorkflowType: newWorkflowType}
+	if err := r.insertEventTx(ctx, tx, id, 1, event); err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert marker event: %v", err)}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to commit: %v", err)}
+	}
+
+	// Update ephemeral cache (version=1, state preserved)
+	newSS := &model.StoredState{ID: id, Version: 1, State: state.State}
+	_ = r.es.PutState(ctx, newSS)
+
+	// If new_cmd provided, process it against preserved state
+	if newCmd != nil {
+		return r.ProcessCommand(ctx, id, newCmd)
+	}
+
+	return newSS, nil, nil
 }
 
-func (r *Repo) GetCurrentState(ctx context.Context, id string) (*model.StoredState, error) {
-	cached, err := r.es.GetState(ctx, id)
-	if err == nil && cached != nil {
-		var lastVersion int64
-		err := r.db.QueryRowContext(ctx, `
-			SELECT workflow_version FROM stored_events WHERE workflow_id = $1 ORDER BY workflow_version DESC LIMIT 1
-		`, id).Scan(&lastVersion)
-		if err == nil && cached.Version == lastVersion {
-			return cached, nil
-		}
-	}
-
-	state, err := r.LoadState(ctx, id, nil)
+// ReplayWorkflow replays events from a specific version to rebuild state.
+// Used for debugging or after data correction.
+func (r *Repo) ReplayWorkflow(ctx context.Context, id string, fromVersion int64) (*model.StoredState, error) {
+	tx, err := r.pool.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	if state == nil {
-		return nil, &model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}
-	}
-	if state.State != nil {
-		_ = r.es.PutState(ctx, state)
-	} else {
-		_ = r.es.RemoveState(ctx, id)
-	}
-	return state, nil
-}
+	defer tx.Rollback(ctx)
 
-func (r *Repo) loadStateTx(ctx context.Context, tx *sql.Tx, id string, atVersion *int64) (*model.StoredState, error) {
+	// Load base state at fromVersion-1
 	var baseState model.State
-	baseVersion := int64(0)
-
-	if r.dbSnapshotModel != "" {
-		var snapshotState []byte
-		var snapshotVersion int64
-		err := tx.QueryRowContext(ctx, `
-			SELECT version, state FROM snapshots WHERE workflow_id = $1
-		`, id).Scan(&snapshotVersion, &snapshotState)
-		if err == nil && (atVersion == nil || snapshotVersion <= *atVersion) {
-			baseVersion = snapshotVersion
+	if fromVersion > 1 {
+		atVersion := fromVersion - 1
+		baseSS, err := r.loadStateTx(ctx, tx, id, &atVersion)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load base state: %w", err)
+		}
+		if baseSS != nil {
+			baseState = baseSS.State
 		}
 	}
 
-	query := `
-		SELECT body, workflow_version, schema_version, event_type FROM stored_events
-		WHERE workflow_id = $1 AND workflow_version > $2
-	`
-	args := []interface{}{id, baseVersion}
-	if atVersion != nil {
-		query += " AND workflow_version <= $3"
-		args = append(args, *atVersion)
-	}
-	query += " ORDER BY workflow_version ASC"
-
-	rows, err := tx.QueryContext(ctx, query, args...)
+	// Load events from fromVersion to HEAD (afterVersion is exclusive, so subtract 1)
+	events, err := r.loadEventsTx(ctx, tx, id, fromVersion-1, nil)
 	if err != nil {
-		return nil, err
-	}
-	return r.replayStoredEventRows(rows, id, baseVersion, baseState)
-}
-
-func (r *Repo) LoadState(ctx context.Context, id string, atVersion *int64) (*model.StoredState, error) {
-	var baseState model.State
-	baseVersion := int64(0)
-
-	if r.dbSnapshotModel != "" {
-		var snapshotState []byte
-		var snapshotVersion int64
-		err := r.db.QueryRowContext(ctx, `
-			SELECT version, state FROM snapshots WHERE workflow_id = $1
-		`, id).Scan(&snapshotVersion, &snapshotState)
-		if err == nil && (atVersion == nil || snapshotVersion <= *atVersion) {
-			baseVersion = snapshotVersion
-		}
-	}
-
-	query := `
-		SELECT body, workflow_version, schema_version, event_type FROM stored_events
-		WHERE workflow_id = $1 AND workflow_version > $2
-	`
-	args := []interface{}{id, baseVersion}
-	if atVersion != nil {
-		query += " AND workflow_version <= $3"
-		args = append(args, *atVersion)
-	}
-	query += " ORDER BY workflow_version ASC"
-
-	rows, err := r.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	return r.replayStoredEventRows(rows, id, baseVersion, baseState)
-}
-
-func (r *Repo) replayStoredEventRows(rows *sql.Rows, workflowID string, baseVersion int64, baseState model.State) (*model.StoredState, error) {
-	defer rows.Close()
-
-	var events []model.Event
-	lastVersion := baseVersion
-
-	for rows.Next() {
-		var bodyBytes []byte
-		var version int64
-		var schemaVersion int
-		var eventType string
-		if err := rows.Scan(&bodyBytes, &version, &schemaVersion, &eventType); err != nil {
-			continue
-		}
-		lastVersion = version
-
-		var raw map[string]any
-		if err := json.Unmarshal(bodyBytes, &raw); err != nil {
-			continue
-		}
-		ev, err := model.DecodeReplayEvent(r.workflow, eventType, schemaVersion, raw)
-		if err != nil || ev == nil {
-			continue
-		}
-		events = append(events, ev)
+		return nil, fmt.Errorf("failed to load events: %w", err)
 	}
 
 	if len(events) == 0 {
-		if baseState == nil {
+		return nil, fmt.Errorf("no events found from version %d", fromVersion)
+	}
+
+	// Evolve through events
+	state := model.EvolveAll(r.workflow, baseState, events)
+	newVersion := fromVersion + int64(len(events)) - 1
+
+	// Maybe snapshot
+	if err := r.maybeSnapshotTx(ctx, tx, id, state, newVersion); err != nil {
+		return nil, fmt.Errorf("failed to snapshot: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit: %w", err)
+	}
+
+	// Update ephemeral cache
+	ss := &model.StoredState{ID: id, Version: newVersion, State: state}
+	_ = r.es.PutState(ctx, ss)
+
+	return ss, nil
+}
+
+// GetWorkflowTags loads the tags for a workflow from the metadata table.
+func (r *Repo) GetWorkflowTags(ctx context.Context, workflowID string) ([]string, error) {
+	var tags []string
+	err := r.pool.QueryRow(ctx,
+		fmt.Sprintf("SELECT tags FROM %s WHERE workflow_id = $1", r.workflowMetaTable),
+		workflowID,
+	).Scan(&tags)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return tags, err
+}
+
+// =============================================================================
+// Internal Methods
+// =============================================================================
+
+// Pool returns the underlying PostgreSQL connection pool.
+func (r *Repo) Pool() *pgxpool.Pool {
+	return r.pool
+}
+
+// EventParser returns the event parser function.
+func (r *Repo) EventParser() EventParser {
+	return r.eventParser
+}
+
+// getCurrentStateTx loads the current state within a transaction.
+// Tries ephemeral cache first, then falls back to DB.
+func (r *Repo) getCurrentStateTx(ctx context.Context, tx pgx.Tx, id string) (*model.StoredState, error) {
+	// Try cache first
+	cached, err := r.es.GetState(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if cached != nil {
+		// Verify cache version if trust_cache is false
+		if !r.trustCache {
+			var dbVersion int64
+			err := tx.QueryRow(ctx,
+				fmt.Sprintf("SELECT MAX(workflow_version) FROM %s WHERE workflow_id = $1", r.eventsTable),
+				id,
+			).Scan(&dbVersion)
+			if err != nil && err != pgx.ErrNoRows {
+				return nil, err
+			}
+			if dbVersion > cached.Version {
+				// Cache is stale, load from DB
+				return r.loadStateTx(ctx, tx, id, nil)
+			}
+		}
+		return cached, nil
+	}
+
+	// Not in cache, load from DB
+	return r.loadStateTx(ctx, tx, id, nil)
+}
+
+// loadStateTx reconstructs state from snapshot + events.
+// If atVersion is non-nil, loads state at that specific version.
+func (r *Repo) loadStateTx(ctx context.Context, tx pgx.Tx, id string, atVersion *int64) (*model.StoredState, error) {
+	var baseState model.State
+	var baseVersion int64
+
+	// Try to load snapshot
+	if r.snapshotInterval > 0 {
+		var snapState json.RawMessage
+		var snapVersion int64
+		query := fmt.Sprintf(
+			"SELECT version, state FROM %s WHERE workflow_id = $1",
+			r.snapshotTable,
+		)
+		args := []any{id}
+		argIdx := 2
+
+		if atVersion != nil {
+			query += fmt.Sprintf(" AND version <= $%d", argIdx)
+			args = append(args, *atVersion)
+			argIdx++
+		}
+
+		err := tx.QueryRow(ctx, query, args...).Scan(&snapVersion, &snapState)
+		if err == nil {
+			baseState, err = r.parseState(snapState)
+			if err == nil {
+				baseVersion = snapVersion
+			}
+		}
+	}
+
+	// Load events strictly after snapshot version (baseVersion is 0 when no snapshot).
+	events, err := r.loadEventsTx(ctx, tx, id, baseVersion, atVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	// No events and no snapshot - workflow doesn't exist
+	if len(events) == 0 && baseState == nil {
+		return nil, nil
+	}
+
+	// Evolve through events
+	var state model.State
+	if len(events) > 0 {
+		state = model.EvolveAll(r.workflow, baseState, events)
+		lastEvent := events[len(events)-1]
+
+		// Check if workflow is terminal (except cancel)
+		if model.IsTerminalState(r.workflow, lastEvent) {
 			return nil, nil
 		}
-		return &model.StoredState{ID: workflowID, Version: baseVersion, State: baseState}, nil
+	} else {
+		state = baseState
 	}
 
-	state := baseState
-	for _, e := range events {
-		state = r.workflow.Evolve(state, e)
+	// Get final version
+	var version int64
+	if len(events) > 0 {
+		version = baseVersion + int64(len(events))
+	} else {
+		version = baseVersion
 	}
 
-	last := events[len(events)-1]
-	if r.workflow.IsFinalEvent(last) {
-		if _, ok := last.(*model.EvSystemCancel); !ok {
-			return &model.StoredState{ID: workflowID, Version: lastVersion, State: nil}, nil
-		}
-	}
-
-	return &model.StoredState{ID: workflowID, Version: lastVersion, State: state}, nil
+	return &model.StoredState{ID: id, Version: version, State: state}, nil
 }
 
-func (r *Repo) SetSearchAttributes(ctx context.Context, workflowID string, attrs map[string]interface{}) error {
-	if r.dbSearchAttributes == "" {
-		return fmt.Errorf("set_search_attributes requires db_search_attributes_model")
-	}
-	attrsBytes, _ := json.Marshal(attrs)
-	_, err := r.db.ExecContext(ctx, `
-		INSERT INTO workflow_search_attributes (workflow_id, workflow_type, attributes, updated_at)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (workflow_id) DO UPDATE SET attributes = workflow_search_attributes.attributes || EXCLUDED.attributes, updated_at = EXCLUDED.updated_at
-	`, workflowID, r.workflowType, attrsBytes, time.Now())
-	return err
-}
+// loadEventsTx loads events from the database within a transaction.
+func (r *Repo) loadEventsTx(ctx context.Context, tx pgx.Tx, id string, afterVersion int64, atVersion *int64) ([]model.Event, error) {
+	query := fmt.Sprintf(
+		"SELECT workflow_version, event_type, body, schema_version FROM %s WHERE workflow_id = $1 AND workflow_version > $2",
+		r.eventsTable,
+	)
+	args := []any{id, afterVersion}
+	argIdx := 3
 
-func (r *Repo) SearchWorkflows(ctx context.Context, attrs map[string]interface{}, limit, offset int) ([]string, error) {
-	if r.dbSearchAttributes == "" {
-		return nil, fmt.Errorf("search_workflows requires db_search_attributes_model")
+	if atVersion != nil {
+		query += fmt.Sprintf(" AND workflow_version <= $%d", argIdx)
+		args = append(args, *atVersion)
+		argIdx++
 	}
-	attrsBytes, _ := json.Marshal(attrs)
-	rows, err := r.db.QueryContext(ctx, `
-		SELECT workflow_id FROM workflow_search_attributes
-		WHERE workflow_type = $1 AND attributes @> $2
-		LIMIT $3 OFFSET $4
-	`, r.workflowType, attrsBytes, limit, offset)
+
+	query += " ORDER BY workflow_version"
+
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var ids []string
+	events := make([]model.Event, 0)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			continue
+		var version int64
+		var eventType string
+		var body json.RawMessage
+		var schemaVersion int
+
+		if err := rows.Scan(&version, &eventType, &body, &schemaVersion); err != nil {
+			return nil, err
 		}
-		ids = append(ids, id)
+
+		if r.eventParser == nil {
+			return nil, fmt.Errorf("event parser is required but not configured for workflow type %q", r.workflowType)
+		}
+
+		// Check if upcasting is needed
+		if schemaVersion < r.workflow.SchemaVersion() {
+			var rawData map[string]any
+			if err := json.Unmarshal(body, &rawData); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal raw data for upcast: %w", err)
+			}
+			rawData = r.workflow.Upcast(eventType, schemaVersion, rawData)
+			if rawData != nil {
+				body, _ = json.Marshal(rawData)
+			}
+		}
+		event, err := r.eventParser(eventType, body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse event type %s: %w", eventType, err)
+		}
+		events = append(events, event)
 	}
-	return ids, nil
+
+	return events, rows.Err()
 }
 
-func (r *Repo) RepublishEvents(ctx context.Context, workflowID string, minEventID, maxEventID *int64) (int, error) {
-	const base = `UPDATE stored_events SET pushed = false WHERE 1=1`
-	wf := workflowID != ""
-	min := minEventID != nil
-	max := maxEventID != nil
-
-	var query string
-	var args []interface{}
-
-	switch {
-	case wf && min && max:
-		query = base + ` AND workflow_id = $1 AND global_id >= $2 AND global_id <= $3`
-		args = []interface{}{workflowID, *minEventID, *maxEventID}
-	case wf && min && !max:
-		query = base + ` AND workflow_id = $1 AND global_id >= $2`
-		args = []interface{}{workflowID, *minEventID}
-	case wf && !min && max:
-		query = base + ` AND workflow_id = $1 AND global_id <= $2`
-		args = []interface{}{workflowID, *maxEventID}
-	case wf && !min && !max:
-		query = base + ` AND workflow_id = $1`
-		args = []interface{}{workflowID}
-	case !wf && min && max:
-		query = base + ` AND global_id >= $1 AND global_id <= $2`
-		args = []interface{}{*minEventID, *maxEventID}
-	case !wf && min && !max:
-		query = base + ` AND global_id >= $1`
-		args = []interface{}{*minEventID}
-	case !wf && !min && max:
-		query = base + ` AND global_id <= $1`
-		args = []interface{}{*maxEventID}
-	default:
-		query = base
-	}
-
-	result, err := r.db.ExecContext(ctx, query, args...)
+// insertEventTx inserts a single event into the events table.
+func (r *Repo) insertEventTx(ctx context.Context, tx pgx.Tx, id string, version int64, event model.Event) error {
+	body, err := json.Marshal(event)
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("failed to marshal event: %w", err)
 	}
-	affected, _ := result.RowsAffected()
-	return int(affected), nil
+
+	var metadata map[string]any
+	if getter, ok := event.(interface{ GetMetadata() map[string]any }); ok {
+		metadata = getter.GetMetadata()
+	}
+	metaBytes, _ := json.Marshal(metadata)
+
+	_, err = tx.Exec(ctx,
+		fmt.Sprintf(`INSERT INTO %s (workflow_id, workflow_version, namespace, event_type, workflow_type, schema_version, body, at, metadata, pushed)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, false)`, r.eventsTable),
+		id, version, r.namespace, event.Type(), r.workflowType, r.workflow.SchemaVersion(),
+		body, time.Now().UTC(), metaBytes,
+	)
+	return err
 }
 
-func NextCronFire(expr, tz string) *time.Time {
-	return delay.NextCronFire(expr, tz)
+// handleSyncEventsTx processes sync events (subscriptions, schedules, etc.).
+// Called BEFORE inserting events into the event table.
+func (r *Repo) handleSyncEventsTx(ctx context.Context, tx pgx.Tx, id string, baseVersion int64, events []model.Event) error {
+	for _, event := range events {
+		switch e := event.(type) {
+		case *model.EvSubscriptionAdded:
+			if err := r.insertSubscriptionTx(ctx, tx, id, e.Sub); err != nil {
+				return err
+			}
+		case *model.EvSubscriptionRemoved:
+			if err := r.deleteSubscriptionTx(ctx, tx, id, e.Sub); err != nil {
+				return err
+			}
+		case *model.EvExternalSubscriptionAdded:
+			if err := r.insertExternalSubscriptionTx(ctx, tx, id, e.Sub); err != nil {
+				return err
+			}
+		case *model.EvExternalSubscriptionRemoved:
+			if err := r.deleteExternalSubscriptionTx(ctx, tx, id, e.Topic); err != nil {
+				return err
+			}
+		case *model.EvScheduleAdded:
+			if err := r.insertDelayScheduleTx(ctx, tx, id, e.Schedule); err != nil {
+				return err
+			}
+		case *model.EvScheduleRemoved:
+			if err := r.deleteDelayScheduleTx(ctx, tx, id, e.DelayID); err != nil {
+				return err
+			}
+		case *model.EvDelay:
+			if e.IsCron() {
+				// Wrap in EvScheduleAdded for processing
+				sched := model.Schedule{
+					ID:             e.ID,
+					CronExpression: e.CronExpression,
+					Timezone:       e.Timezone,
+					NextCmd:        e.NextCmd,
+				}
+				if err := r.insertDelayScheduleTx(ctx, tx, id, sched); err != nil {
+					return err
+				}
+			}
+		case *model.EvCancelSchedule:
+			if err := r.deleteDelayScheduleTx(ctx, tx, id, e.DelayID); err != nil {
+				return err
+			}
+		case *model.EvSystemCancel:
+			// Delete all delay schedules for this workflow
+			_, err := tx.Exec(ctx,
+				fmt.Sprintf("DELETE FROM %s WHERE workflow_id = $1", r.delayScheduleTable),
+				id,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-func ActivityToJSON(a *postgres.Activity) ([]byte, error) {
-	return json.Marshal(a)
+// insertSubscriptionTx inserts a subscription into the subscriptions table.
+func (r *Repo) insertSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID string, sub model.Sub) error {
+	_, err := tx.Exec(ctx,
+		fmt.Sprintf(`INSERT INTO %s (workflow_id, subscribed_to_workflow, subscribed_to_event_type, workflow_type, tags, tags_all, namespace)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (workflow_id, subscribed_to_workflow, subscribed_to_event_type) DO NOTHING`,
+			r.subscriptionsTable),
+		workflowID, sub.WorkflowID, sub.EventType, r.workflowType, sub.Tags, sub.TagsAll, r.namespace,
+	)
+	return err
+}
+
+// deleteSubscriptionTx deletes a subscription from the subscriptions table.
+// Matches on workflow_id, subscribed_to_workflow, subscribed_to_event_type, tags,
+// tags_all, and namespace — all five columns must match to ensure correct deletion
+// when multiple subscriptions exist with the same (event_type, workflow_id) but
+// different tag filters.
+func (r *Repo) deleteSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID string, sub model.Sub) error {
+	_, err := tx.Exec(ctx,
+		fmt.Sprintf(`DELETE FROM %s WHERE workflow_id = $1 AND subscribed_to_workflow = $2 AND subscribed_to_event_type = $3 AND tags = $4 AND tags_all = $5 AND namespace = $6`,
+			r.subscriptionsTable),
+		workflowID, sub.WorkflowID, sub.EventType, sub.Tags, sub.TagsAll, r.namespace,
+	)
+	return err
+}
+
+// insertExternalSubscriptionTx inserts an external subscription.
+func (r *Repo) insertExternalSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID string, sub model.ExternalSub) error {
+	_, err := tx.Exec(ctx,
+		fmt.Sprintf(`INSERT INTO %s (workflow_id, topic, workflow_type) VALUES ($1, $2, $3)
+			ON CONFLICT (workflow_id, topic) DO NOTHING`,
+			r.externalSubsTable),
+		workflowID, sub.Topic, r.workflowType,
+	)
+	return err
+}
+
+// deleteExternalSubscriptionTx deletes an external subscription.
+func (r *Repo) deleteExternalSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID, topic string) error {
+	_, err := tx.Exec(ctx,
+		fmt.Sprintf(`DELETE FROM %s WHERE workflow_id = $1 AND topic = $2`,
+			r.externalSubsTable),
+		workflowID, topic,
+	)
+	return err
+}
+
+// insertDelayScheduleTx inserts or updates a delay schedule.
+func (r *Repo) insertDelayScheduleTx(ctx context.Context, tx pgx.Tx, workflowID string, sched model.Schedule) error {
+	nextCmdBytes, _ := json.Marshal(sched.NextCmd)
+	_, err := tx.Exec(ctx,
+		fmt.Sprintf(`INSERT INTO %s (workflow_id, delay_id, workflow_type, delay_until, cron_expression, timezone, next_command, event_version, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (workflow_id, delay_id) DO UPDATE SET
+				delay_until = EXCLUDED.delay_until,
+				cron_expression = EXCLUDED.cron_expression,
+				timezone = EXCLUDED.timezone,
+				next_command = EXCLUDED.next_command,
+				event_version = EXCLUDED.event_version`,
+			r.delayScheduleTable),
+		workflowID, sched.ID, r.workflowType, time.Now().UTC(), sched.CronExpression, sched.Timezone, nextCmdBytes, int64(0), time.Now().UTC(),
+	)
+	return err
+}
+
+// deleteDelayScheduleTx deletes a delay schedule.
+func (r *Repo) deleteDelayScheduleTx(ctx context.Context, tx pgx.Tx, workflowID, delayID string) error {
+	_, err := tx.Exec(ctx,
+		fmt.Sprintf(`DELETE FROM %s WHERE workflow_id = $1 AND delay_id = $2`,
+			r.delayScheduleTable),
+		workflowID, delayID,
+	)
+	return err
+}
+
+// maybeSnapshotTx creates a snapshot if the version matches the interval.
+func (r *Repo) maybeSnapshotTx(ctx context.Context, tx pgx.Tx, id string, state model.State, version int64) error {
+	if r.snapshotInterval <= 0 || version%int64(r.snapshotInterval) != 0 {
+		return nil
+	}
+	return r.upsertSnapshotTx(ctx, tx, id, state, version)
+}
+
+// upsertSnapshotTx creates or updates a snapshot.
+func (r *Repo) upsertSnapshotTx(ctx context.Context, tx pgx.Tx, id string, state model.State, version int64) error {
+	stateBytes, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
+		fmt.Sprintf(`INSERT INTO %s (workflow_id, workflow_type, version, state, created_at)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (workflow_id) DO UPDATE SET version = $3, state = $4, created_at = $5`,
+			r.snapshotTable),
+		id, r.workflowType, version, stateBytes, time.Now().UTC(),
+	)
+	return err
+}
+
+// loadWorkflowTagsTx loads workflow tags within a transaction.
+func (r *Repo) loadWorkflowTagsTx(ctx context.Context, tx pgx.Tx, id string) ([]string, error) {
+	var tags []string
+	err := tx.QueryRow(ctx,
+		fmt.Sprintf("SELECT tags FROM %s WHERE workflow_id = $1", r.workflowMetaTable),
+		id,
+	).Scan(&tags)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	return tags, err
+}
+
+// parseState deserializes JSON into a State.
+// This is a placeholder - concrete implementations should provide proper parsing.
+func (r *Repo) parseState(data json.RawMessage) (model.State, error) {
+	// The concrete workflow should provide a state parser
+	// For now, return a basic StateBase
+	var state model.StateBase
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	return &state, nil
+}
+
+// namespaceArg returns the namespace argument for queries.
+func (r *Repo) namespaceArg() interface{} {
+	if r.namespace == nil {
+		return nil
+	}
+	return *r.namespace
+}
+
+// isUniqueViolation checks if an error is a PostgreSQL unique constraint violation.
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	var pgErr interface{ SQLState() string }
+	if errors.As(err, &pgErr) {
+		return pgErr.SQLState() == "23505"
+	}
+	return false
 }

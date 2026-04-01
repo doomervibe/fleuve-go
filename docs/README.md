@@ -22,8 +22,9 @@ Welcome. These pages supplement the [project README](../README.md) with structur
 |----------|----------|
 | [**Configuration**](./configuration.md) | `fleuve.toml`, `FLEUVE_*`, UI flags, OpenTelemetry |
 | [**Operations**](./operations.md) | Deploy order, migrations, CI, metrics |
+| [**NATS gateway commands**](./nats-gateway-commands.md) | Optional request/reply from gateway to runner (`gateway_commands_via_nats`) |
 | [**Packages**](./packages.md) | `pkg/*` responsibilities |
-| [**Bundled UI**](./ui-embed.md) | `pkg/uiembed`, vendoring script, overrides |
+| [**Bundled UI**](./ui-embed.md) | `pkg/uiembed`, `pkg/uibackend`, vendoring script |
 
 ---
 
@@ -33,6 +34,7 @@ Welcome. These pages supplement the [project README](../README.md) with structur
 |----------|----------|
 | [**INTEGRATION**](./INTEGRATION.md) | Same database as Python, schema checks, cutover (no mixed runners) |
 | [**Behavior & parity**](./behavior-and-python-parity.md) | Ordering, acks, offsets, recovery, how to validate |
+| [**Python ↔ Go checklist**](./python-go-parity-checklist.md) | Engine + UI parity matrix (repo, stream, gateway, UI) |
 
 ---
 

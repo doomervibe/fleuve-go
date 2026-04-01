@@ -2,247 +2,272 @@ package truncation
 
 import (
 	"context"
-	"database/sql"
+	"fmt"
 	"log"
+	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type TruncationService struct {
-	db              *sql.DB
-	workflowType    string
-	minRetention    time.Duration
-	batchSize       int
-	checkInterval   time.Duration
-	snapshotEnabled bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	running         bool
-}
+const (
+	defaultCheckInterval = 1 * time.Hour
+	defaultMinRetention  = 7 * 24 * time.Hour
+	defaultBatchSize     = 1000
+)
 
+// TruncationOption is a functional option for TruncationService configuration.
 type TruncationOption func(*TruncationService)
 
-func WithMinRetention(d time.Duration) TruncationOption {
-	return func(s *TruncationService) { s.minRetention = d }
+// WithCheckInterval sets the interval between truncation cycles.
+func WithCheckInterval(interval time.Duration) TruncationOption {
+	return func(s *TruncationService) { s.checkInterval = interval }
 }
 
-func WithBatchSize(n int) TruncationOption {
-	return func(s *TruncationService) { s.batchSize = n }
+// WithMinRetention sets the minimum retention period before events can be truncated.
+func WithMinRetention(retention time.Duration) TruncationOption {
+	return func(s *TruncationService) { s.minRetention = retention }
 }
 
-func WithCheckInterval(d time.Duration) TruncationOption {
-	return func(s *TruncationService) { s.checkInterval = d }
+// WithBatchSize sets the maximum number of events to delete per workflow per cycle.
+func WithBatchSize(size int) TruncationOption {
+	return func(s *TruncationService) { s.batchSize = size }
 }
 
-func WithSnapshots(enabled bool) TruncationOption {
-	return func(s *TruncationService) { s.snapshotEnabled = enabled }
+// WithEventsTable sets the stored_events table name.
+func WithEventsTable(table string) TruncationOption {
+	return func(s *TruncationService) { s.eventsTable = table }
 }
 
-func NewTruncationService(db *sql.DB, workflowType string, opts ...TruncationOption) *TruncationService {
+// WithSnapshotsTable sets the snapshots table name.
+func WithSnapshotsTable(table string) TruncationOption {
+	return func(s *TruncationService) { s.snapshotsTable = table }
+}
+
+// WithOffsetsTable sets the offsets table name.
+func WithOffsetsTable(table string) TruncationOption {
+	return func(s *TruncationService) { s.offsetsTable = table }
+}
+
+// snapshotRow represents a row from the snapshots table.
+type snapshotRow struct {
+	WorkflowID string
+	Version    int64
+}
+
+// TruncationService safely deletes old events that are covered by snapshots.
+// Events are only deleted when ALL of the following conditions are met:
+//   - Event is before the snapshot version (snapshot covers it)
+//   - Event's global_id is below minimum reader offset (all readers processed it)
+//   - Event has been published to NATS (outbox complete, pushed = true)
+//   - Event is older than minimum retention period
+type TruncationService struct {
+	pool           *pgxpool.Pool
+	workflowType   string
+	checkInterval  time.Duration
+	minRetention   time.Duration
+	batchSize      int
+	eventsTable    string
+	snapshotsTable string
+	offsetsTable   string
+
+	cancelFunc context.CancelFunc
+	wg         sync.WaitGroup
+}
+
+// NewTruncationService creates a new TruncationService.
+//
+// Parameters:
+//   - pool: PostgreSQL connection pool
+//   - workflowType: the workflow type this truncator handles
+//   - opts: optional configuration
+func NewTruncationService(
+	pool *pgxpool.Pool,
+	workflowType string,
+	opts ...TruncationOption,
+) *TruncationService {
 	s := &TruncationService{
-		db:              db,
-		workflowType:    workflowType,
-		minRetention:    7 * 24 * time.Hour,
-		batchSize:       1000,
-		checkInterval:   time.Hour,
-		snapshotEnabled: true,
+		pool:           pool,
+		workflowType:   workflowType,
+		checkInterval:  defaultCheckInterval,
+		minRetention:   defaultMinRetention,
+		batchSize:      defaultBatchSize,
+		eventsTable:    "stored_events",
+		snapshotsTable: "snapshots",
+		offsetsTable:   "offsets",
 	}
+
 	for _, opt := range opts {
 		opt(s)
 	}
+
 	return s
 }
 
-func (s *TruncationService) Start(ctx context.Context) error {
-	s.ctx, s.cancel = context.WithCancel(ctx)
-	s.running = true
-	go s.runLoop()
-	return nil
+// Start starts the truncation loop as a goroutine.
+// The loop runs until Stop() is called or the context is cancelled.
+func (s *TruncationService) Start(ctx context.Context) {
+	ctx, s.cancelFunc = context.WithCancel(ctx)
+
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.runLoop(ctx)
+	}()
 }
 
-func (s *TruncationService) Stop() error {
-	s.running = false
-	if s.cancel != nil {
-		s.cancel()
+// Stop stops the truncation service and waits for the loop to exit.
+func (s *TruncationService) Stop() {
+	if s.cancelFunc != nil {
+		s.cancelFunc()
 	}
-	return nil
+	s.wg.Wait()
 }
 
-func (s *TruncationService) runLoop() {
+// runLoop is the main loop that runs truncation cycles every checkInterval.
+func (s *TruncationService) runLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.checkInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := s.truncate(); err != nil {
-				log.Printf("Truncation error: %v", err)
-			}
+			s.runTruncationCycle(ctx)
 		}
 	}
 }
 
-func (s *TruncationService) truncate() error {
-	if !s.snapshotEnabled {
-		log.Printf("Truncation skipped: snapshots not enabled")
-		return nil
+// runTruncationCycle performs one truncation cycle:
+//  1. Get minimum reader offset from offsets table
+//  2. Get all snapshots for this workflow type
+//  3. For each snapshot, delete eligible events in batches
+func (s *TruncationService) runTruncationCycle(ctx context.Context) {
+	// Step 1: Get minimum reader offset
+	minOffset, err := s.getMinReaderOffset(ctx)
+	if err != nil {
+		log.Printf("[truncation] failed to get min reader offset: %v", err)
+		return
 	}
 
-	cutoff := time.Now().Add(-s.minRetention)
+	// If no readers have recorded offsets, we cannot safely truncate anything
+	if minOffset == 0 {
+		log.Printf("[truncation] no reader offsets recorded, skipping cycle")
+		return
+	}
 
-	rows, err := s.db.QueryContext(s.ctx, `
-		SELECT DISTINCT workflow_id FROM stored_events 
-		WHERE workflow_type = $1 AND at < $2
-	`, s.workflowType, cutoff)
+	// Step 2: Get all snapshots for this workflow type
+	snapshots, err := s.getSnapshots(ctx)
 	if err != nil {
-		return err
+		log.Printf("[truncation] failed to get snapshots: %v", err)
+		return
+	}
+
+	if len(snapshots) == 0 {
+		log.Printf("[truncation] no snapshots found, skipping cycle")
+		return
+	}
+
+	// Step 3: Calculate cutoff time
+	cutoffTime := time.Now().UTC().Add(-s.minRetention)
+
+	// Step 4: Delete eligible events for each snapshot
+	var totalDeleted int64
+	for _, snap := range snapshots {
+		deleted, err := s.deleteEventsForSnapshot(ctx, snap, minOffset, cutoffTime)
+		if err != nil {
+			log.Printf("[truncation] failed to delete events for workflow %s: %v",
+				snap.WorkflowID, err)
+			continue
+		}
+		totalDeleted += deleted
+	}
+
+	if totalDeleted > 0 {
+		log.Printf("[truncation] deleted %d events for workflow type %s",
+			totalDeleted, s.workflowType)
+	}
+}
+
+// getMinReaderOffset returns the minimum last_read_event_no from the offsets table.
+// Returns 0 if no offsets exist.
+func (s *TruncationService) getMinReaderOffset(ctx context.Context) (int64, error) {
+	var minOffset *int64
+	err := s.pool.QueryRow(ctx,
+		fmt.Sprintf("SELECT MIN(last_read_event_no) FROM %s", s.offsetsTable),
+	).Scan(&minOffset)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to query min offset: %w", err)
+	}
+
+	if minOffset == nil {
+		return 0, nil
+	}
+
+	return *minOffset, nil
+}
+
+// getSnapshots returns all (workflow_id, version) pairs from snapshots table
+// for this workflow type.
+func (s *TruncationService) getSnapshots(ctx context.Context) ([]snapshotRow, error) {
+	rows, err := s.pool.Query(ctx,
+		fmt.Sprintf("SELECT workflow_id, version FROM %s WHERE workflow_type = $1",
+			s.snapshotsTable),
+		s.workflowType,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query snapshots: %w", err)
 	}
 	defer rows.Close()
 
-	var workflowIDs []string
+	var snapshots []snapshotRow
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			continue
+		var row snapshotRow
+		if err := rows.Scan(&row.WorkflowID, &row.Version); err != nil {
+			return nil, fmt.Errorf("failed to scan snapshot row: %w", err)
 		}
-		workflowIDs = append(workflowIDs, id)
+		snapshots = append(snapshots, row)
 	}
 
-	for _, wfID := range workflowIDs {
-		if err := s.truncateWorkflow(wfID, cutoff); err != nil {
-			log.Printf("Failed to truncate workflow %s: %v", wfID, err)
-			continue
-		}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating snapshot rows: %w", err)
 	}
 
-	return nil
+	return snapshots, nil
 }
 
-func (s *TruncationService) truncateWorkflow(workflowID string, cutoff time.Time) error {
-	tx, err := s.db.BeginTx(s.ctx, nil)
+// deleteEventsForSnapshot deletes events that are:
+//   - For the given workflow_id
+//   - Before the snapshot version
+//   - Have global_id below minOffset (all readers processed)
+//   - Have been published to NATS (pushed = true)
+//   - Older than cutoffTime
+//
+// Returns the number of deleted events.
+func (s *TruncationService) deleteEventsForSnapshot(
+	ctx context.Context,
+	snap snapshotRow,
+	minOffset int64,
+	cutoffTime time.Time,
+) (int64, error) {
+	result, err := s.pool.Exec(ctx,
+		fmt.Sprintf(`DELETE FROM %s
+			WHERE workflow_id = $1
+			AND workflow_version < $2
+			AND global_id < $3
+			AND pushed = true
+			AND at < $4
+			LIMIT %d`, s.eventsTable, s.batchSize),
+		snap.WorkflowID,
+		snap.Version,
+		minOffset,
+		cutoffTime,
+	)
 	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var snapshotVersion int64
-	err = tx.QueryRowContext(s.ctx, `
-		SELECT version FROM snapshots WHERE workflow_id = $1
-	`, workflowID).Scan(&snapshotVersion)
-	if err != nil && err != sql.ErrNoRows {
-		return err
+		return 0, fmt.Errorf("failed to delete events: %w", err)
 	}
 
-	if snapshotVersion == 0 {
-		return nil
-	}
-
-	result, err := tx.ExecContext(s.ctx, `
-		DELETE FROM stored_events 
-		WHERE workflow_id = $1 AND workflow_version < $2 AND at < $3
-	`, workflowID, snapshotVersion, cutoff)
-	if err != nil {
-		return err
-	}
-
-	affected, _ := result.RowsAffected()
-	if affected > 0 {
-		log.Printf("Truncated %d events for workflow %s (snapshot version: %d)", affected, workflowID, snapshotVersion)
-	}
-
-	return tx.Commit()
-}
-
-func (s *TruncationService) TruncateNow(ctx context.Context) (int64, error) {
-	cutoff := time.Now().Add(-s.minRetention)
-
-	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM stored_events 
-		WHERE workflow_type = $1 AND at < $2
-		AND workflow_id IN (SELECT workflow_id FROM snapshots)
-		AND workflow_version < (SELECT version FROM snapshots s WHERE s.workflow_id = stored_events.workflow_id)
-	`, s.workflowType, cutoff)
-	if err != nil {
-		return 0, err
-	}
-
-	return result.RowsAffected()
-}
-
-type ReconciliationService struct {
-	db           *sql.DB
-	workflowType string
-	interval     time.Duration
-	ctx          context.Context
-	cancel       context.CancelFunc
-}
-
-func NewReconciliationService(db *sql.DB, workflowType string, interval time.Duration) *ReconciliationService {
-	return &ReconciliationService{
-		db:           db,
-		workflowType: workflowType,
-		interval:     interval,
-	}
-}
-
-func (s *ReconciliationService) Start(ctx context.Context) error {
-	s.ctx, s.cancel = context.WithCancel(ctx)
-	go s.runLoop()
-	return nil
-}
-
-func (s *ReconciliationService) Stop() error {
-	if s.cancel != nil {
-		s.cancel()
-	}
-	return nil
-}
-
-func (s *ReconciliationService) runLoop() {
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-ticker.C:
-			if err := s.reconcile(); err != nil {
-				log.Printf("Reconciliation error: %v", err)
-			}
-		}
-	}
-}
-
-func (s *ReconciliationService) reconcile() error {
-	rows, err := s.db.QueryContext(s.ctx, `
-		SELECT DISTINCT e.workflow_id, e.workflow_version, s.version
-		FROM stored_events e
-		LEFT JOIN snapshots s ON e.workflow_id = s.workflow_id
-		WHERE e.workflow_type = $1
-		AND (s.version IS NULL OR e.workflow_version > s.version)
-		AND e.workflow_version > 0
-		ORDER BY e.workflow_id
-	`, s.workflowType)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var workflowID string
-		var eventVersion, snapshotVersion int64
-		if err := rows.Scan(&workflowID, &eventVersion, &snapshotVersion); err != nil {
-			continue
-		}
-
-		if snapshotVersion == 0 {
-			snapshotVersion = 0
-		}
-
-		log.Printf("Reconciliation: %s at v%d (snapshot: v%d)", workflowID, eventVersion, snapshotVersion)
-	}
-
-	return nil
+	return result.RowsAffected(), nil
 }

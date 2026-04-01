@@ -12,7 +12,7 @@ Checklist for running and maintaining this repo in a trusted environment. This i
 2. **NATS JetStream** — stream and KV layout must match what the runner expects (see main Fleuve docs / Python parity).
 3. **Runner** (`fleuve-runner`) — long-lived consumer: `-type CounterWorkflow` (default) matches the built-in aggregate in `pkg/counterworkflow`. Uses NATS when `[fleuve] enable_jetstream = true` and `nats_url` is set; otherwise polls `stored_events` with a reader key `{WorkflowName}_pg` and persists NATS offsets under `{WorkflowName}_nats` when JetStream is enabled.
 4. **Gateway** (`fleuve-gateway`) — wires CounterWorkflow + `ActionExecutor` (activity rows in `activities`, structured logs via `log/slog`). Extend `pkg/fleuvecmd` or your own `main` to add types.
-5. **UI** (`fleuve-ui`) — optional; serves the admin API plus the **vendored Python Fleuve `frontend_dist`** (`pkg/uiembed/dist`, embedded). Refresh with `./scripts/vendor-fleuve-ui.sh`. Use `-frontend` / `FLEUVE_FRONTEND_DIST` to override with another build; `-api-only` for JSON-only at `/`.
+5. **UI** (`fleuve-ui` / `go run ./examples/ui_server`) — optional; reference server composing **`pkg/uibackend`** + **`pkg/uiembed`** (vendored `frontend_dist`). Refresh assets with `./scripts/vendor-fleuve-ui.sh` then rebuild.
 
 ## Configuration
 

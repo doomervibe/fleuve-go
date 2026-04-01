@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -ldflags='-w -s -extldflags "-static"' \
-    -a -o fleuve-ui ./cmd/ui
+    -a -o fleuve-ui ./examples/ui_server
 
 # Runtime stage
 FROM alpine:3.19
