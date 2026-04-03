@@ -850,7 +850,9 @@ func (r *Repo) handleSyncEventsTx(ctx context.Context, tx pgx.Tx, id string, bas
 			}
 		case *model.EvDelay:
 			if e.IsCron() {
-				// Wrap in EvScheduleAdded for processing
+				// Cron delay: store in delay_schedules so the scheduler can compute
+				// the first fire time from the cron expression (delay_until = now as
+				// a sentinel; scheduler overwrites on first tick).
 				sched := model.Schedule{
 					ID:             e.ID,
 					CronExpression: e.CronExpression,
@@ -858,6 +860,13 @@ func (r *Repo) handleSyncEventsTx(ctx context.Context, tx pgx.Tx, id string, bas
 					NextCmd:        e.NextCmd,
 				}
 				if err := r.insertDelayScheduleTx(ctx, tx, id, sched); err != nil {
+					return err
+				}
+			} else {
+				// One-shot delay: insert with the actual fire time from the event.
+				// Python handles this in SideEffects.maybe_act_on via DelayScheduler;
+				// doing it here (same tx) is cleaner and avoids a separate DB round-trip.
+				if err := r.insertOneShotDelayTx(ctx, tx, id, e); err != nil {
 					return err
 				}
 			}
@@ -940,6 +949,27 @@ func (r *Repo) insertDelayScheduleTx(ctx context.Context, tx pgx.Tx, workflowID 
 				event_version = EXCLUDED.event_version`,
 			r.delayScheduleTable),
 		workflowID, sched.ID, r.workflowType, time.Now().UTC(), sched.CronExpression, sched.Timezone, nextCmdBytes, int64(0), time.Now().UTC(),
+	)
+	return err
+}
+
+// insertOneShotDelayTx inserts a one-shot delay schedule using the fire time from
+// the EvDelay event.  Unlike insertDelayScheduleTx (which uses time.Now() as a
+// sentinel for cron schedules), this sets delay_until to e.DelayUntil so the
+// DelayScheduler fires at the correct wall-clock time.
+func (r *Repo) insertOneShotDelayTx(ctx context.Context, tx pgx.Tx, workflowID string, e *model.EvDelay) error {
+	nextCmdBytes, _ := json.Marshal(e.NextCmd)
+	_, err := tx.Exec(ctx,
+		fmt.Sprintf(`INSERT INTO %s (workflow_id, delay_id, workflow_type, delay_until, cron_expression, timezone, next_command, event_version, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (workflow_id, delay_id) DO UPDATE SET
+				delay_until    = EXCLUDED.delay_until,
+				cron_expression = EXCLUDED.cron_expression,
+				timezone       = EXCLUDED.timezone,
+				next_command   = EXCLUDED.next_command,
+				event_version  = EXCLUDED.event_version`,
+			r.delayScheduleTable),
+		workflowID, e.ID, r.workflowType, e.DelayUntil.UTC(), "", "", nextCmdBytes, int64(0), time.Now().UTC(),
 	)
 	return err
 }
