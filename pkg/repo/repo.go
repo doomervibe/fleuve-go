@@ -172,7 +172,7 @@ func (r *Repo) ProcessCommand(ctx context.Context, id string, cmd model.Command)
 		}
 
 		// Step 2: Load current state
-		state, err := r.getCurrentStateTx(ctx, tx, id)
+		state, err := r.getCurrentStateTx(ctx, tx, id, false)
 		if err != nil {
 			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}
 		}
@@ -629,6 +629,34 @@ func (r *Repo) GetWorkflowTags(ctx context.Context, workflowID string) ([]string
 	return tags, err
 }
 
+// GetState returns the current workflow state and its version.
+//
+// Loading order: ephemeral cache first; the cached StoredState.Version is
+// always compared to the current MAX(workflow_version) in stored_events for
+// this workflow. If the DB is ahead of the cache, state is rebuilt from
+// snapshot + events. If there is no cache entry, state is loaded from the DB
+// only.
+//
+// Returns (nil, nil) when the workflow has no events and no snapshot, or when
+// replay ends in a terminal state that yields no readable aggregate state (same
+// rules as loadStateTx).
+//
+// GetState does not write to the event log and does not update the ephemeral
+// cache (read-only).
+func (r *Repo) GetState(ctx context.Context, id string) (*model.StoredState, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	ss, err := r.getCurrentStateTx(ctx, tx, id, true)
+	if err != nil {
+		return nil, err
+	}
+	return ss, nil
+}
+
 // =============================================================================
 // Internal Methods
 // =============================================================================
@@ -643,34 +671,45 @@ func (r *Repo) EventParser() EventParser {
 	return r.eventParser
 }
 
+// maxWorkflowVersionTx returns the highest workflow_version for id in stored_events, or 0 if none.
+func (r *Repo) maxWorkflowVersionTx(ctx context.Context, tx pgx.Tx, id string) (int64, error) {
+	var dbVersion int64
+	err := tx.QueryRow(ctx,
+		fmt.Sprintf("SELECT COALESCE(MAX(workflow_version), 0) FROM %s WHERE workflow_id = $1", r.eventsTable),
+		id,
+	).Scan(&dbVersion)
+	if err != nil {
+		return 0, err
+	}
+	return dbVersion, nil
+}
+
 // getCurrentStateTx loads the current state within a transaction.
 // Tries ephemeral cache first, then falls back to DB.
-func (r *Repo) getCurrentStateTx(ctx context.Context, tx pgx.Tx, id string) (*model.StoredState, error) {
-	// Try cache first
+//
+// If forceDBVersionCheck is true, a cache hit is accepted only when
+// cached.Version equals the current MAX(workflow_version) in the DB; otherwise
+// state is reloaded from snapshot + events. ProcessCommand passes false here and
+// relies on trustCache: when trustCache is false, the same check runs; when
+// trustCache is true, the cache is trusted without a DB read.
+func (r *Repo) getCurrentStateTx(ctx context.Context, tx pgx.Tx, id string, forceDBVersionCheck bool) (*model.StoredState, error) {
 	cached, err := r.es.GetState(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	if cached != nil {
-		// Verify cache version if trust_cache is false
-		if !r.trustCache {
-			var dbVersion int64
-			err := tx.QueryRow(ctx,
-				fmt.Sprintf("SELECT MAX(workflow_version) FROM %s WHERE workflow_id = $1", r.eventsTable),
-				id,
-			).Scan(&dbVersion)
-			if err != nil && err != pgx.ErrNoRows {
+		if forceDBVersionCheck || !r.trustCache {
+			dbVersion, err := r.maxWorkflowVersionTx(ctx, tx, id)
+			if err != nil {
 				return nil, err
 			}
-			if dbVersion > cached.Version {
-				// Cache is stale, load from DB
+			if dbVersion != cached.Version {
 				return r.loadStateTx(ctx, tx, id, nil)
 			}
 		}
 		return cached, nil
 	}
 
-	// Not in cache, load from DB
 	return r.loadStateTx(ctx, tx, id, nil)
 }
 
@@ -891,25 +930,30 @@ func (r *Repo) handleSyncEventsTx(ctx context.Context, tx pgx.Tx, id string, bas
 // insertSubscriptionTx inserts a subscription into the subscriptions table.
 func (r *Repo) insertSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID string, sub model.Sub) error {
 	_, err := tx.Exec(ctx,
-		fmt.Sprintf(`INSERT INTO %s (workflow_id, subscribed_to_workflow, subscribed_to_event_type, workflow_type, tags, tags_all, namespace)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (workflow_id, subscribed_to_workflow, subscribed_to_event_type) DO NOTHING`,
+		fmt.Sprintf(`INSERT INTO %s (workflow_id, subscribed_to_workflow, subscribed_to_event_type, workflow_type, tags, tags_all, namespace, after_emitter_event_no)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			ON CONFLICT (workflow_id, subscribed_to_workflow, subscribed_to_event_type) DO UPDATE SET
+				workflow_type = EXCLUDED.workflow_type,
+				tags = EXCLUDED.tags,
+				tags_all = EXCLUDED.tags_all,
+				namespace = EXCLUDED.namespace,
+				after_emitter_event_no = EXCLUDED.after_emitter_event_no`,
 			r.subscriptionsTable),
-		workflowID, sub.WorkflowID, sub.EventType, r.workflowType, sub.Tags, sub.TagsAll, r.namespace,
+		workflowID, sub.WorkflowID, sub.EventType, r.workflowType, sub.Tags, sub.TagsAll, r.namespace, sub.AfterEmitterEventNo,
 	)
 	return err
 }
 
 // deleteSubscriptionTx deletes a subscription from the subscriptions table.
 // Matches on workflow_id, subscribed_to_workflow, subscribed_to_event_type, tags,
-// tags_all, and namespace — all five columns must match to ensure correct deletion
+// tags_all, namespace, and after_emitter_event_no — all columns must match to ensure correct deletion
 // when multiple subscriptions exist with the same (event_type, workflow_id) but
-// different tag filters.
+// different tag filters or horizons.
 func (r *Repo) deleteSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID string, sub model.Sub) error {
 	_, err := tx.Exec(ctx,
-		fmt.Sprintf(`DELETE FROM %s WHERE workflow_id = $1 AND subscribed_to_workflow = $2 AND subscribed_to_event_type = $3 AND tags = $4 AND tags_all = $5 AND namespace = $6`,
+		fmt.Sprintf(`DELETE FROM %s WHERE workflow_id = $1 AND subscribed_to_workflow = $2 AND subscribed_to_event_type = $3 AND tags = $4 AND tags_all = $5 AND namespace = $6 AND after_emitter_event_no IS NOT DISTINCT FROM $7`,
 			r.subscriptionsTable),
-		workflowID, sub.WorkflowID, sub.EventType, sub.Tags, sub.TagsAll, r.namespace,
+		workflowID, sub.WorkflowID, sub.EventType, sub.Tags, sub.TagsAll, r.namespace, sub.AfterEmitterEventNo,
 	)
 	return err
 }

@@ -21,7 +21,8 @@ import (
 // =============================================================================
 
 type testWorkflow struct {
-	name string
+	name       string
+	eventToCmd func(model.Event) model.Command
 }
 
 type testState struct {
@@ -185,7 +186,12 @@ func (s *testState) ApplyScheduleRemove(delayID string) model.State {
 	return result
 }
 
-func (w *testWorkflow) EventToCmd(e model.Event) model.Command { return nil }
+func (w *testWorkflow) EventToCmd(e model.Event) model.Command {
+	if w.eventToCmd != nil {
+		return w.eventToCmd(e)
+	}
+	return nil
+}
 
 func (w *testWorkflow) IsFinalEvent(e model.Event) bool {
 	_, ok := e.(*testFinalEvent)

@@ -50,52 +50,71 @@ func (r *Runner) workflowsToNotify(ctx context.Context, consumed *stream.Consume
 }
 
 // findSubscriptions queries the subscriptions table for workflows of this runner's
-// workflow type that are subscribed to the given event.
-//
-// Mirrors Python WorkflowsRunner._find_subscriptions_from_db with this SQL:
-//
-//	SELECT DISTINCT workflow_id
-//	FROM subscriptions
-//	WHERE workflow_type = $1            -- this runner's workflow type (subscriber side)
-//	  AND (
-//	        (subscribed_to_event_type = ANY('*', $event_type)  AND subscribed_to_workflow = $emitter_id)
-//	     OR (subscribed_to_event_type = $event_type            AND subscribed_to_workflow = ANY('*', $emitter_id))
-//	  )
-//
-// TODO: tag matching (tags / tags_all columns) is not yet implemented.
+// workflow type that are subscribed to the given event, then applies model.Sub
+// tag matching (tags OR / tags_all AND) against event and workflow tags from
+// consumed metadata — same rules as subscriptionEmittedEventMatches in backfill.
 func (r *Runner) findSubscriptions(ctx context.Context, consumed *stream.ConsumedEvent) ([]string, error) {
 	if consumed.EventType == "" {
 		return nil, nil
 	}
 
+	eventTags := consumed.GetEventTags()
+	workflowTags := consumed.GetWorkflowTags()
+
 	const query = `
-		SELECT DISTINCT workflow_id
+		SELECT workflow_id, subscribed_to_workflow, subscribed_to_event_type, tags, tags_all, after_emitter_event_no
 		FROM subscriptions
 		WHERE workflow_type = $1
 		  AND (
 		        (subscribed_to_event_type = ANY($2) AND subscribed_to_workflow = $3)
 		     OR (subscribed_to_event_type = $4      AND subscribed_to_workflow = ANY($5))
-		  )`
+		  )
+		  AND (after_emitter_event_no IS NULL OR $6 > after_emitter_event_no)`
 
 	rows, err := r.cfg.Pool.Query(ctx, query,
-		r.cfg.WorkflowType,                 // $1 — subscriber's workflow type
-		[]string{"*", consumed.EventType},  // $2 — subscribed_to_event_type IN ('*', event_type)
-		consumed.WorkflowID,                // $3
-		consumed.EventType,                 // $4
-		[]string{"*", consumed.WorkflowID}, // $5 — subscribed_to_workflow IN ('*', emitter_id)
+		r.cfg.WorkflowType,
+		[]string{"*", consumed.EventType},
+		consumed.WorkflowID,
+		consumed.EventType,
+		[]string{"*", consumed.WorkflowID},
+		consumed.EventNo,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("findSubscriptions: %w", err)
 	}
 	defer rows.Close()
 
-	var out []string
+	seen := make(map[string]struct{})
 	for rows.Next() {
-		var wfID string
-		if err := rows.Scan(&wfID); err != nil {
+		var wfID, subWf, subEv string
+		var tags, tagsAll []string
+		var horizon *int64
+		if err := rows.Scan(&wfID, &subWf, &subEv, &tags, &tagsAll, &horizon); err != nil {
 			return nil, fmt.Errorf("findSubscriptions scan: %w", err)
 		}
+		sub := model.Sub{
+			WorkflowID:          subWf,
+			EventType:           subEv,
+			Tags:                tags,
+			TagsAll:             tagsAll,
+			AfterEmitterEventNo: horizon,
+		}
+		if !sub.MatchesWorkflowAndEvent(consumed.WorkflowID, consumed.EventType) {
+			continue
+		}
+		if !sub.MatchesTags(eventTags, workflowTags) {
+			continue
+		}
+		seen[wfID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]string, 0, len(seen))
+	for wfID := range seen {
 		out = append(out, wfID)
 	}
-	return out, rows.Err()
+	sort.Strings(out)
+	return out, nil
 }

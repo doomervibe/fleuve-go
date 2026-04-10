@@ -786,6 +786,35 @@ func TestSubscriptionLifecycle(t *testing.T) {
 	}
 }
 
+func TestSubscriptionHorizon_Persisted(t *testing.T) {
+	t.Cleanup(func() { CleanTables(t) })
+
+	r := NewTestRepo(t, &testWorkflow{name: "test"})
+	id := UniqueID(t, "subhz")
+	h := int64(3)
+	sub := model.Sub{
+		EventType:           "some_event",
+		WorkflowID:          "*",
+		AfterEmitterEventNo: &h,
+	}
+	ctx := context.Background()
+	_, err := r.CreateNew(ctx, &testAddSubCmd{Sub: sub}, id, nil)
+	if err != nil {
+		t.Fatalf("CreateNew failed: %v", err)
+	}
+
+	var stored *int64
+	err = GetTestPool(t).QueryRow(context.Background(),
+		`SELECT after_emitter_event_no FROM subscriptions WHERE workflow_id = $1`,
+		id).Scan(&stored)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if stored == nil || *stored != 3 {
+		t.Fatalf("after_emitter_event_no: got %v, want 3", stored)
+	}
+}
+
 // =============================================================================
 // FinalEvent / Cache Removal Tests
 // =============================================================================

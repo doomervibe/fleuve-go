@@ -21,11 +21,21 @@ const (
 //   - TagsAll (AND): if non-empty, ALL tags must be in event_tags ∪ workflow_tags
 //   - Both Tags and TagsAll can be empty (no tag filtering)
 //   - Both can be specified simultaneously (combined with AND between groups)
+//
+// AfterEmitterEventNo, when non-nil, is an exclusive lower bound on the emitter's
+// workflow_version (stored_events.workflow_version / ConsumedEvent.EventNo): the
+// runner only delivers notifications when event_no > *AfterEmitterEventNo. nil means
+// no horizon (same as legacy subscriptions). When EvSubscriptionAdded is processed,
+// the runner replays matching emitter events already in stored_events above this
+// horizon so subscribers do not miss events that committed before the subscription row.
 type Sub struct {
 	EventType  string   `json:"event_type"`
 	WorkflowID string   `json:"workflow_id"`
 	Tags       []string `json:"tags,omitempty"`
 	TagsAll    []string `json:"tags_all,omitempty"`
+	// AfterEmitterEventNo is an exclusive horizon on the emitter workflow's event number.
+	// nil = do not filter by version (and no DB backfill on subscribe).
+	AfterEmitterEventNo *int64 `json:"after_emitter_event_no,omitempty"`
 }
 
 // MatchesTags checks if this subscription matches the given event and workflow tags.
@@ -78,7 +88,7 @@ func (s *Sub) MatchesWorkflowAndEvent(workflowID, eventType string) bool {
 	return true
 }
 
-// Equals returns true if all four fields match exactly.
+// Equals returns true if all fields match exactly.
 // Used for subscription removal matching.
 func (s *Sub) Equals(other Sub) bool {
 	if s.WorkflowID != other.WorkflowID {
@@ -93,17 +103,36 @@ func (s *Sub) Equals(other Sub) bool {
 	if !stringSlicesEqual(s.TagsAll, other.TagsAll) {
 		return false
 	}
+	if !int64PtrEqual(s.AfterEmitterEventNo, other.AfterEmitterEventNo) {
+		return false
+	}
 	return true
 }
 
 // Copy returns a deep copy of the Sub.
 func (s *Sub) Copy() Sub {
-	return Sub{
-		EventType:  s.EventType,
-		WorkflowID: s.WorkflowID,
-		Tags:       append([]string(nil), s.Tags...),
-		TagsAll:    append([]string(nil), s.TagsAll...),
+	var h *int64
+	if s.AfterEmitterEventNo != nil {
+		v := *s.AfterEmitterEventNo
+		h = &v
 	}
+	return Sub{
+		EventType:           s.EventType,
+		WorkflowID:          s.WorkflowID,
+		Tags:                append([]string(nil), s.Tags...),
+		TagsAll:             append([]string(nil), s.TagsAll...),
+		AfterEmitterEventNo: h,
+	}
+}
+
+func int64PtrEqual(a, b *int64) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return *a == *b
 }
 
 // =============================================================================

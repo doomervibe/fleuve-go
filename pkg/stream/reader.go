@@ -66,8 +66,10 @@ func (s *Sleeper) Sleep(ctx context.Context, gotEvents bool) error {
 // EventParser - Event Deserialization
 // =============================================================================
 
-// EventParser is a function that deserializes raw JSON into an Event.
-type EventParser func(eventType string, raw json.RawMessage) (Event, error)
+// EventParser deserializes raw JSON into an Event. workflowType is the
+// emitter's aggregate type from stored_events (e.g. "domain", "project");
+// eventType is the per-event type string (e.g. "updated", "project_patch").
+type EventParser func(workflowType string, eventType string, raw json.RawMessage) (Event, error)
 
 // Event is the interface for events consumed from the stream.
 type Event interface {
@@ -131,7 +133,7 @@ func NewConsumedEvent(
 func (e *ConsumedEvent) Event() (Event, error) {
 	e.once.Do(func() {
 		if e.parser != nil && len(e.rawBody) > 0 {
-			e.parsedEvent, e.parseErr = e.parser(e.EventType, e.rawBody)
+			e.parsedEvent, e.parseErr = e.parser(e.WorkflowType, e.EventType, e.rawBody)
 		}
 	})
 	return e.parsedEvent, e.parseErr

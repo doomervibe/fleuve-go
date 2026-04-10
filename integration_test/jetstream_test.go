@@ -35,7 +35,7 @@ func newTestNATSConnection(t *testing.T) *nats.Conn {
 }
 
 // jetstreamTestStreamParser returns a minimal stream.Event (lazy body not needed for these tests).
-func jetstreamTestStreamParser(eventType string, raw json.RawMessage) (stream.Event, error) {
+func jetstreamTestStreamParser(_ string, eventType string, raw json.RawMessage) (stream.Event, error) {
 	return streamEventWrap{typ: eventType}, nil
 }
 

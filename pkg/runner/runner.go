@@ -56,7 +56,14 @@ type Config struct {
 	Repo *repo.Repo
 
 	// EventParser deserializes raw JSON into model.Event (required).
+	// Used for repo replay and as a fallback when StreamDeserialize is nil.
 	EventParser repo.EventParser
+
+	// StreamDeserialize parses stored_events rows for this runner's stream reader.
+	// The emitter's workflow_type and event_type are both provided so ambiguous
+	// short names like "updated" deserialize correctly. When nil, EventParser
+	// is called with (eventType, raw) only (legacy).
+	StreamDeserialize func(workflowType string, eventType string, raw json.RawMessage) (model.Event, error)
 
 	// ReaderName is the unique consumer name for offset tracking.
 	// Defaults to "<WorkflowType>_runner".
@@ -81,13 +88,14 @@ type Config struct {
 // Runner is an embeddable workflow event runner.
 // Create one with New, then call Start to begin processing.
 type Runner struct {
-	cfg            Config
-	reader         *stream.Reader
-	actionExecutor *actions.ActionExecutor
-	delayScheduler *delay.DelayScheduler
-	reconciler     *reconcile.Reconciler
-	truncationSvc  *truncation.TruncationService
-	stopFn         context.CancelFunc
+	cfg                 Config
+	reader              *stream.Reader
+	actionExecutor      *actions.ActionExecutor
+	delayScheduler      *delay.DelayScheduler
+	reconciler          *reconcile.Reconciler
+	truncationSvc       *truncation.TruncationService
+	streamDeserializeFn func(workflowType string, eventType string, raw json.RawMessage) (model.Event, error)
+	stopFn              context.CancelFunc
 }
 
 // New creates a Runner from cfg, wiring up the stream reader, action executor,
@@ -104,9 +112,16 @@ func New(cfg Config) *Runner {
 		checkInterval = time.Second
 	}
 
-	// Stream reader: wraps the repo EventParser as a stream.EventParser.
-	streamParser := func(eventType string, raw json.RawMessage) (stream.Event, error) {
-		return cfg.EventParser(eventType, raw)
+	streamDeserialize := cfg.StreamDeserialize
+	if streamDeserialize == nil {
+		streamDeserialize = func(_ string, eventType string, raw json.RawMessage) (model.Event, error) {
+			return cfg.EventParser(eventType, raw)
+		}
+	}
+
+	// Stream reader: typed deserialization by emitter workflow_type + event_type.
+	streamParser := func(workflowType string, eventType string, raw json.RawMessage) (stream.Event, error) {
+		return streamDeserialize(workflowType, eventType, raw)
 	}
 	reader := stream.NewReader(cfg.Pool, cfg.ReaderName, streamParser,
 		stream.WithFetchMetadata(true),
@@ -133,11 +148,12 @@ func New(cfg Config) *Runner {
 	)
 
 	r := &Runner{
-		cfg:            cfg,
-		reader:         reader,
-		actionExecutor: actionExecutor,
-		delayScheduler: delayScheduler,
-		reconciler:     reconcile.NewReconciler(cfg.Pool, cfg.WorkflowType),
+		cfg:                 cfg,
+		reader:              reader,
+		actionExecutor:      actionExecutor,
+		delayScheduler:      delayScheduler,
+		reconciler:          reconcile.NewReconciler(cfg.Pool, cfg.WorkflowType),
+		streamDeserializeFn: streamDeserialize,
 	}
 	if cfg.EnableTruncation {
 		r.truncationSvc = truncation.NewTruncationService(cfg.Pool, cfg.WorkflowType)
@@ -258,7 +274,16 @@ func (r *Runner) processEvent(ctx context.Context, consumed *stream.ConsumedEven
 				}
 			}
 		}
+
+		// Subscription horizon backfill: deliver missed emitter events from stored_events.
+		if e, ok := parsedEvent.(*model.EvSubscriptionAdded); ok && e.Sub.AfterEmitterEventNo != nil {
+			if err := r.backfillSubscription(ctx, consumed, &e.Sub); err != nil {
+				log.Printf("[runner:%s] subscription backfill failed: %v", r.cfg.ReaderName, err)
+			}
+		}
 	}
+
+	injectEmitterMetaForSubscribers(parsedEvent, consumed)
 
 	// Step 2 — map event to a command; nil means this event is not routable.
 	cmd := r.cfg.Workflow.EventToCmd(parsedEvent)
@@ -295,4 +320,21 @@ func streamToModelEvent(consumed *stream.ConsumedEvent, parsedEvent model.Event)
 		At:           consumed.At.Format(time.RFC3339),
 		Metadata:     consumed.Metadata,
 	}
+}
+
+// injectEmitterMetaForSubscribers records emitter identity and version on the
+// event before Workflow.EventToCmd so subscribers can route cross-domain
+// commands (e.g. recipe planner, recipe aggregate).
+func injectEmitterMetaForSubscribers(ev model.Event, consumed *stream.ConsumedEvent) {
+	type metaTarget interface {
+		GetMetadata() map[string]any
+	}
+	t, ok := ev.(metaTarget)
+	if !ok {
+		return
+	}
+	m := t.GetMetadata()
+	m[model.MetaEmitterWorkflowVersion] = consumed.EventNo
+	m[model.MetaEmitterWorkflowID] = consumed.WorkflowID
+	m[model.MetaEmitterWorkflowType] = consumed.WorkflowType
 }

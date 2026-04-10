@@ -13,7 +13,7 @@ import (
 )
 
 // integrationStreamParser bridges test model events to stream.Event.
-func integrationStreamParser(eventType string, raw json.RawMessage) (stream.Event, error) {
+func integrationStreamParser(_ string, eventType string, raw json.RawMessage) (stream.Event, error) {
 	ev, err := testEventParser(eventType, raw)
 	if err != nil {
 		return nil, err

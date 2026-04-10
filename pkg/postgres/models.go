@@ -89,6 +89,7 @@ type Subscription struct {
 	Tags                  []string `json:"tags"`
 	TagsAll               []string `json:"tags_all"`
 	Namespace             *string  `json:"namespace,omitempty"`
+	AfterEmitterEventNo   *int64   `json:"after_emitter_event_no,omitempty"`
 }
 
 // ExternalSubscription represents a row in the external_subscriptions table.

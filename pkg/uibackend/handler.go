@@ -455,7 +455,7 @@ func (h *handler) getWorkflow(w http.ResponseWriter, r *http.Request, workflowID
 	_ = h.pool.QueryRow(ctx, qFirst, workflowID).Scan(&atFirst)
 
 	qSub := fmt.Sprintf(`
-		SELECT subscribed_to_workflow, subscribed_to_event_type FROM %s WHERE workflow_id = $1`, h.sub)
+		SELECT subscribed_to_workflow, subscribed_to_event_type, after_emitter_event_no FROM %s WHERE workflow_id = $1`, h.sub)
 	rows, err := h.pool.Query(ctx, qSub, workflowID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -465,14 +465,19 @@ func (h *handler) getWorkflow(w http.ResponseWriter, r *http.Request, workflowID
 	var subs []map[string]string
 	for rows.Next() {
 		var swf, evT string
-		if err := rows.Scan(&swf, &evT); err != nil {
+		var h *int64
+		if err := rows.Scan(&swf, &evT, &h); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		subs = append(subs, map[string]string{
+		m := map[string]string{
 			"workflow_id": swf,
 			"event_type":  evT,
-		})
+		}
+		if h != nil {
+			m["after_emitter_event_no"] = fmt.Sprintf("%d", *h)
+		}
+		subs = append(subs, m)
 	}
 	if err := rows.Err(); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

@@ -8,6 +8,20 @@ type Event interface {
 	Type() string
 }
 
+// MetaEmitterWorkflowVersion is the metadata key the workflow runner sets on
+// incoming events before Workflow.EventToCmd. The value is the emitter
+// aggregate's stored_events.workflow_version (int64) for that event — used by
+// subscribers (e.g. recipes) to bump target_version without ambiguous JSON.
+const MetaEmitterWorkflowVersion = "emitter_workflow_version"
+
+// MetaEmitterWorkflowID is the emitter workflow_id (UUID string) for the event
+// being processed — used by subscribers that need the target aggregate id when
+// the event body does not repeat it.
+const MetaEmitterWorkflowID = "emitter_workflow_id"
+
+// MetaEmitterWorkflowType is the emitter workflow_type (e.g. "domain", "project").
+const MetaEmitterWorkflowType = "emitter_workflow_type"
+
 // EventBase provides common fields for all events.
 // The Metadata field is internal and NOT serialized to JSON - it carries
 // injected workflow tags and other framework metadata alongside the event.
