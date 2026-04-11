@@ -671,6 +671,13 @@ func (r *Repo) EventParser() EventParser {
 	return r.eventParser
 }
 
+// EventsTable returns the configured stored_events table name. This is
+// exposed so callers (notably the action executor's recovery scanner)
+// can load raw event rows for replay without hardcoding the table name.
+func (r *Repo) EventsTable() string {
+	return r.eventsTable
+}
+
 // maxWorkflowVersionTx returns the highest workflow_version for id in stored_events, or 0 if none.
 func (r *Repo) maxWorkflowVersionTx(ctx context.Context, tx pgx.Tx, id string) (int64, error) {
 	var dbVersion int64

@@ -41,6 +41,17 @@ var (
 	ErrActionTimeout   = errors.New("action timed out")
 	ErrAlreadyRunning  = errors.New("action already running")
 	ErrActionCompleted = errors.New("action already completed")
+	// ErrEmptyAction is returned when ActOn closed its channel without
+	// emitting any yield. A zero-yield run almost always means the adapter
+	// was interrupted (crash, restart, context cancel before first yield)
+	// rather than completing successfully, so it must flow through the
+	// retry path instead of being silently marked COMPLETED.
+	ErrEmptyAction = errors.New("action produced no yields")
+	// ErrNoHandler is returned by recovery when the current adapter no
+	// longer claims a stuck event (ToBeActOn == false). Re-firing would
+	// create an endless pending loop, so recovery marks the activity
+	// FAILED instead.
+	ErrNoHandler = errors.New("no adapter handler for event at recovery time")
 )
 
 // =============================================================================
@@ -403,6 +414,7 @@ func (ex *ActionExecutor) executeSingleAttempt(
 		}
 	}()
 
+	yieldCount := 0
 	for yield := range yieldCh {
 		// Check for context cancellation
 		select {
@@ -413,6 +425,8 @@ func (ex *ActionExecutor) executeSingleAttempt(
 			return ErrActionTimeout
 		default:
 		}
+
+		yieldCount++
 
 		switch y := yield.(type) {
 		case model.CommandYield:
@@ -448,6 +462,17 @@ func (ex *ActionExecutor) executeSingleAttempt(
 			// If we get here, all remaining yields were consumed successfully
 			return nil
 		}
+	}
+
+	// Channel closed cleanly. If the adapter never yielded anything, treat
+	// this as a failed attempt rather than a success: a silent channel
+	// close almost always means the adapter was interrupted (process
+	// crash, restart, context cancellation before first yield) and the
+	// action did not actually run to completion. Returning an error here
+	// funnels the attempt through the normal retry path instead of
+	// marking the activity COMPLETED with an empty checkpoint.
+	if yieldCount == 0 {
+		return ErrEmptyAction
 	}
 
 	return nil
@@ -614,13 +639,42 @@ func (ex *ActionExecutor) recoveryLoop() {
 	}
 }
 
+// stuckActivity is a row captured by the recovery scanner while it holds
+// a row-level lock in the recovery transaction. The reconstructed
+// ConsumedEvent is built and dispatched only after the transaction has
+// been committed.
+type stuckActivity struct {
+	workflowID   string
+	eventNumber  int
+	eventType    string
+	workflowType string
+}
+
 func (ex *ActionExecutor) recoverStuckActivities() {
 	// Find activities with status RUNNING/RETRYING where last_attempt_at < 5 minutes ago OR null
-	// These are considered "stuck" and should be retried
+	// These are considered "stuck" and should be retried.
+	//
+	// The SELECT FOR UPDATE SKIP LOCKED and the UPDATE that resets rows
+	// to PENDING must happen on the *same* connection inside a single
+	// transaction. If we used pool.Query + pool.Exec (two connections),
+	// the UPDATE would fight the lock held by the SELECT cursor and
+	// could deadlock or run against an unlocked row that another runner
+	// already picked up.
 	cutoff := time.Now().UTC().Add(-5 * time.Minute)
 
-	rows, err := ex.pool.Query(ex.ctx,
-		`SELECT workflow_id, event_number, event_type, workflow_type, checkpoint, retry_count, retry_policy
+	tx, err := ex.pool.BeginTx(ex.ctx, pgx.TxOptions{})
+	if err != nil {
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ex.ctx)
+		}
+	}()
+
+	rows, err := tx.Query(ex.ctx,
+		`SELECT workflow_id, event_number, event_type, workflow_type
 		 FROM workflow_activities
 		 WHERE status IN ($1, $2)
 		   AND (last_attempt_at IS NULL OR last_attempt_at < $3)
@@ -630,38 +684,115 @@ func (ex *ActionExecutor) recoverStuckActivities() {
 	if err != nil {
 		return
 	}
-	defer rows.Close()
 
+	stuck := make([]stuckActivity, 0)
 	for rows.Next() {
-		var workflowID string
-		var eventNumber int
-		var eventType string
-		var workflowType string
-		var checkpoint json.RawMessage
-		var retryCount int
-		var retryPolicyJSON json.RawMessage
+		var s stuckActivity
+		if err := rows.Scan(&s.workflowID, &s.eventNumber, &s.eventType, &s.workflowType); err != nil {
+			continue
+		}
+		stuck = append(stuck, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return
+	}
 
-		if err := rows.Scan(&workflowID, &eventNumber, &eventType, &workflowType, &checkpoint, &retryCount, &retryPolicyJSON); err != nil {
+	// Reset the claimed rows to PENDING within the same tx so the lock
+	// releases atomically on commit.
+	for _, s := range stuck {
+		if _, err := tx.Exec(ex.ctx,
+			`UPDATE workflow_activities SET status = $1 WHERE workflow_id = $2 AND event_number = $3`,
+			ActivityStatusPending, s.workflowID, s.eventNumber,
+		); err != nil {
+			return
+		}
+	}
+
+	if err := tx.Commit(ex.ctx); err != nil {
+		return
+	}
+	committed = true
+
+	// Now that we own these activities in PENDING state, rehydrate each
+	// event from the event store and dispatch it to the executor.
+	for _, s := range stuck {
+		event, loadErr := ex.loadRecoveryEvent(ex.ctx, s)
+		if loadErr != nil {
+			ex.markFailed(ex.ctx, s.workflowID, s.eventNumber,
+				fmt.Errorf("failed to reload event for recovery: %w", loadErr))
 			continue
 		}
 
-		// Reconstruct ConsumedEvent from DB
-		event := &model.ConsumedEvent{
-			WorkflowID:   workflowID,
-			EventNo:      int64(eventNumber),
-			EventType:    eventType,
-			WorkflowType: workflowType,
+		// Skip if the current adapter no longer handles this event.
+		// Re-firing would just bounce the activity back to PENDING and
+		// loop forever — better to fail it loudly.
+		if !ex.adapter.ToBeActOn(event) {
+			ex.markFailed(ex.ctx, s.workflowID, s.eventNumber, ErrNoHandler)
+			continue
 		}
 
-		// Reset status to PENDING so execute_action can pick it up
-		_, _ = ex.pool.Exec(ex.ctx,
-			`UPDATE workflow_activities SET status = $1 WHERE workflow_id = $2 AND event_number = $3`,
-			ActivityStatusPending, workflowID, eventNumber,
-		)
-
-		// Call execute_action - will retry from last checkpoint
+		// Call ExecuteAction — will retry from the persisted checkpoint.
 		_ = ex.ExecuteAction(event)
 	}
+}
+
+// loadRecoveryEvent reconstructs a ConsumedEvent from the stored_events
+// table so the adapter receives a fully populated event during recovery.
+// A recovered ConsumedEvent with a nil Event field is the single biggest
+// source of silent empty-yield completions: most adapters short-circuit
+// when Event is nil, the ActOn channel closes immediately, and prior to
+// the empty-yield guard the executor would mark the activity COMPLETED.
+func (ex *ActionExecutor) loadRecoveryEvent(ctx context.Context, s stuckActivity) (*model.ConsumedEvent, error) {
+	if ex.repo == nil {
+		return nil, fmt.Errorf("repo not configured")
+	}
+	parser := ex.repo.EventParser()
+	if parser == nil {
+		return nil, fmt.Errorf("event parser not configured")
+	}
+
+	var (
+		globalID     int64
+		eventType    string
+		workflowType string
+		body         json.RawMessage
+		at           time.Time
+		metadataRaw  json.RawMessage
+	)
+
+	query := fmt.Sprintf(
+		`SELECT global_id, event_type, workflow_type, body, at, metadata
+		 FROM %s
+		 WHERE workflow_id = $1 AND workflow_version = $2`,
+		ex.repo.EventsTable(),
+	)
+	if err := ex.pool.QueryRow(ctx, query, s.workflowID, s.eventNumber).Scan(
+		&globalID, &eventType, &workflowType, &body, &at, &metadataRaw,
+	); err != nil {
+		return nil, err
+	}
+
+	parsed, err := parser(eventType, body)
+	if err != nil {
+		return nil, fmt.Errorf("parse event %s: %w", eventType, err)
+	}
+
+	var metadata map[string]any
+	if len(metadataRaw) > 0 {
+		_ = json.Unmarshal(metadataRaw, &metadata)
+	}
+
+	return &model.ConsumedEvent{
+		GlobalID:     globalID,
+		WorkflowID:   s.workflowID,
+		WorkflowType: workflowType,
+		EventNo:      int64(s.eventNumber),
+		EventType:    eventType,
+		Event:        parsed,
+		At:           at.Format(time.RFC3339Nano),
+		Metadata:     metadata,
+	}, nil
 }
 
 // =============================================================================
@@ -834,7 +965,11 @@ func (ex *ActionExecutor) updateStatus(
 	return dbErr
 }
 
-// saveCheckpoint persists the checkpoint data.
+// saveCheckpoint persists the checkpoint data and bumps last_attempt_at.
+// Bumping last_attempt_at is critical: the recovery scanner uses it as a
+// liveness signal. Without the bump, a long-running action that yields
+// checkpoints regularly would still look "stuck" to recovery after five
+// minutes and get hijacked from under itself.
 func (ex *ActionExecutor) saveCheckpoint(ctx context.Context, workflowID string, eventNumber int, checkpoint map[string]any) error {
 	checkpointJSON, err := json.Marshal(checkpoint)
 	if err != nil {
@@ -842,8 +977,8 @@ func (ex *ActionExecutor) saveCheckpoint(ctx context.Context, workflowID string,
 	}
 
 	_, err = ex.pool.Exec(ctx,
-		`UPDATE workflow_activities SET checkpoint = $1 WHERE workflow_id = $2 AND event_number = $3`,
-		checkpointJSON, workflowID, eventNumber,
+		`UPDATE workflow_activities SET checkpoint = $1, last_attempt_at = $2 WHERE workflow_id = $3 AND event_number = $4`,
+		checkpointJSON, time.Now().UTC(), workflowID, eventNumber,
 	)
 	return err
 }
