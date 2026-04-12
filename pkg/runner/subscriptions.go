@@ -61,15 +61,18 @@ func (r *Runner) findSubscriptions(ctx context.Context, consumed *stream.Consume
 	eventTags := consumed.GetEventTags()
 	workflowTags := consumed.GetWorkflowTags()
 
-	const query = `
+	query := fmt.Sprintf(`
 		SELECT workflow_id, subscribed_to_workflow, subscribed_to_event_type, tags, tags_all, after_emitter_event_no
-		FROM subscriptions
+		FROM %s
 		WHERE workflow_type = $1
 		  AND (
 		        (subscribed_to_event_type = ANY($2) AND subscribed_to_workflow = $3)
 		     OR (subscribed_to_event_type = $4      AND subscribed_to_workflow = ANY($5))
 		  )
-		  AND (after_emitter_event_no IS NULL OR $6 > after_emitter_event_no)`
+		  AND (after_emitter_event_no IS NULL OR $6 > after_emitter_event_no)
+		  AND (subscription_added_global_id IS NULL OR $7 >= subscription_added_global_id)
+		  AND ($8::text IS NULL OR namespace IS NOT DISTINCT FROM $8)`,
+		r.cfg.SubscriptionsTable)
 
 	rows, err := r.cfg.Pool.Query(ctx, query,
 		r.cfg.WorkflowType,
@@ -78,6 +81,8 @@ func (r *Runner) findSubscriptions(ctx context.Context, consumed *stream.Consume
 		consumed.EventType,
 		[]string{"*", consumed.WorkflowID},
 		consumed.EventNo,
+		consumed.GlobalID,
+		r.cfg.Namespace,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("findSubscriptions: %w", err)

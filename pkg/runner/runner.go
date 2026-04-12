@@ -81,6 +81,16 @@ type Config struct {
 	// nil = this runner owns all workflows.
 	IsMine func(workflowID string) bool
 
+	// SubscriptionsTable is the subscriptions table name.
+	// Defaults to "subscriptions". Must match the table name used by repo.Repo
+	// (see repo.WithSubscriptionsTable).
+	SubscriptionsTable string
+
+	// Namespace restricts subscription lookups to a specific namespace.
+	// nil = no namespace filtering (matches all rows). Must match the namespace
+	// configured on repo.Repo (see repo.WithNamespace).
+	Namespace *string
+
 	// EnableTruncation starts the truncation service for this workflow type.
 	EnableTruncation bool
 }
@@ -106,6 +116,9 @@ func New(cfg Config) *Runner {
 	}
 	if cfg.IsMine == nil {
 		cfg.IsMine = func(string) bool { return true }
+	}
+	if cfg.SubscriptionsTable == "" {
+		cfg.SubscriptionsTable = "subscriptions"
 	}
 	checkInterval := cfg.DelayCheckInterval
 	if checkInterval == 0 {

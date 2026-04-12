@@ -253,6 +253,11 @@ func (r *Repo) ProcessCommand(ctx context.Context, id string, cmd model.Command)
 			continue // Some events weren't inserted - retry
 		}
 
+		// Step 9.5: Record global_id for horizon subscriptions to prevent double-delivery
+		if err := r.updateSubscriptionAddedGlobalIDsTx(ctx, tx, id, state.Version, events); err != nil {
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to update subscription global IDs: %v", err)}
+		}
+
 		// Step 10: Maybe snapshot
 		if err := r.maybeSnapshotTx(ctx, tx, id, newState, newVersion); err != nil {
 			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to snapshot: %v", err)}
@@ -339,6 +344,11 @@ func (r *Repo) CreateNew(ctx context.Context, cmd model.Command, id string, tags
 			}
 			return nil, fmt.Errorf("failed to insert event at version %d: %w", i+1, err)
 		}
+	}
+
+	// Step 6.5: Record global_id for horizon subscriptions to prevent double-delivery
+	if err := r.updateSubscriptionAddedGlobalIDsTx(ctx, tx, id, 0, events); err != nil {
+		return nil, fmt.Errorf("failed to update subscription global IDs: %w", err)
 	}
 
 	// Step 7: Maybe snapshot
@@ -951,16 +961,46 @@ func (r *Repo) insertSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID s
 	return err
 }
 
+// updateSubscriptionAddedGlobalIDsTx sets subscription_added_global_id for any
+// EvSubscriptionAdded events with a horizon, matching the global_id just assigned
+// by the DB to those events. Must be called inside the same transaction, after
+// the events have been inserted into stored_events.
+func (r *Repo) updateSubscriptionAddedGlobalIDsTx(ctx context.Context, tx pgx.Tx, workflowID string, baseVersion int64, events []model.Event) error {
+	for i, event := range events {
+		e, ok := event.(*model.EvSubscriptionAdded)
+		if !ok || e.Sub.AfterEmitterEventNo == nil {
+			continue
+		}
+		version := baseVersion + int64(i) + 1
+		tag, err := tx.Exec(ctx,
+			fmt.Sprintf(`UPDATE %s
+				SET subscription_added_global_id = (
+					SELECT global_id FROM %s WHERE workflow_id = $1 AND workflow_version = $2
+				)
+				WHERE workflow_id = $1
+				  AND subscribed_to_workflow = $3
+				  AND subscribed_to_event_type = $4`,
+				r.subscriptionsTable, r.eventsTable),
+			workflowID, version, e.Sub.WorkflowID, e.Sub.EventType,
+		)
+		if err != nil {
+			return fmt.Errorf("updateSubscriptionAddedGlobalIDsTx: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("updateSubscriptionAddedGlobalIDsTx: no subscription row found for workflow %s -> %s/%s", workflowID, e.Sub.WorkflowID, e.Sub.EventType)
+		}
+	}
+	return nil
+}
+
 // deleteSubscriptionTx deletes a subscription from the subscriptions table.
-// Matches on workflow_id, subscribed_to_workflow, subscribed_to_event_type, tags,
-// tags_all, namespace, and after_emitter_event_no — all columns must match to ensure correct deletion
-// when multiple subscriptions exist with the same (event_type, workflow_id) but
-// different tag filters or horizons.
+// Matches on the unique key (workflow_id, subscribed_to_workflow, subscribed_to_event_type),
+// which is the same key used by insertSubscriptionTx's ON CONFLICT clause.
 func (r *Repo) deleteSubscriptionTx(ctx context.Context, tx pgx.Tx, workflowID string, sub model.Sub) error {
 	_, err := tx.Exec(ctx,
-		fmt.Sprintf(`DELETE FROM %s WHERE workflow_id = $1 AND subscribed_to_workflow = $2 AND subscribed_to_event_type = $3 AND tags = $4 AND tags_all = $5 AND namespace = $6 AND after_emitter_event_no IS NOT DISTINCT FROM $7`,
+		fmt.Sprintf(`DELETE FROM %s WHERE workflow_id = $1 AND subscribed_to_workflow = $2 AND subscribed_to_event_type = $3`,
 			r.subscriptionsTable),
-		workflowID, sub.WorkflowID, sub.EventType, sub.Tags, sub.TagsAll, r.namespace, sub.AfterEmitterEventNo,
+		workflowID, sub.WorkflowID, sub.EventType,
 	)
 	return err
 }
