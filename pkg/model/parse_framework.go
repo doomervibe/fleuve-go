@@ -59,11 +59,24 @@ func ParseFrameworkEvent(eventType string, raw json.RawMessage) (Event, error) {
 		}
 		return &e, nil
 	case EventTypeDelay:
-		var e EvDelay
-		if err := json.Unmarshal(raw, &e); err != nil {
+		// NextCmd is a Command interface — json.Unmarshal cannot populate it from
+		// a stored "{}" value. During replay we only need the scheduling fields;
+		// the NextCmd is not required to reconstruct workflow state.
+		var body struct {
+			ID             string    `json:"id"`
+			DelayUntil     time.Time `json:"delay_until"`
+			CronExpression string    `json:"cron_expression,omitempty"`
+			Timezone       string    `json:"timezone,omitempty"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
 			return nil, fmt.Errorf("parse EvDelay: %w", err)
 		}
-		return &e, nil
+		return &EvDelay{
+			ID:             body.ID,
+			DelayUntil:     body.DelayUntil,
+			CronExpression: body.CronExpression,
+			Timezone:       body.Timezone,
+		}, nil
 	case EventTypeDirectMessage:
 		var e EvDirectMessage
 		if err := json.Unmarshal(raw, &e); err != nil {
