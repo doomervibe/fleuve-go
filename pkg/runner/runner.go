@@ -311,6 +311,31 @@ func (r *Runner) processEvent(ctx context.Context, consumed *stream.ConsumedEven
 	}
 
 	for _, wfID := range workflowIDs {
+		// When the adapter handles this event type, route through adapter
+		// so it can enrich the command (e.g. load full project context for
+		// cross-workflow subscription events like project_patch → domain).
+		if r.cfg.Adapter != nil {
+			me := streamToModelEvent(consumed, parsedEvent)
+			me.WorkflowID = wfID // target the subscriber workflow
+			if r.cfg.Adapter.ToBeActOn(me) {
+				ch, aErr := r.cfg.Adapter.ActOn(ctx, me, nil)
+				if aErr != nil {
+					log.Printf("[runner:%s] subscription adapter ActOn failed for %s: %v",
+						r.cfg.ReaderName, wfID, aErr)
+				} else {
+					for yield := range ch {
+						if cy, ok := yield.(model.CommandYield); ok {
+							_, _, rej := r.cfg.Repo.ProcessCommand(ctx, wfID, cy.Cmd)
+							if rej != nil {
+								log.Printf("[runner:%s] subscription adapter command rejected for %s: %s",
+									r.cfg.ReaderName, wfID, rej.Msg)
+							}
+						}
+					}
+				}
+				continue
+			}
+		}
 		_, _, rejection := r.cfg.Repo.ProcessCommand(ctx, wfID, cmd)
 		if rejection != nil {
 			log.Printf("[runner:%s] command rejected for workflow %s: %s",
