@@ -234,19 +234,20 @@ func (r *Repo) ProcessCommand(ctx context.Context, id string, cmd model.Command)
 		}
 
 		// Step 9: INSERT all events
+		insertConflict := false
 		for i, e := range events {
 			eventVersion := state.Version + int64(i) + 1
 			if err := r.insertEventTx(ctx, tx, id, eventVersion, e); err != nil {
 				if isUniqueViolation(err) {
-					// Concurrent command - retry
+					// Concurrent command - retry with a fresh transaction
+					insertConflict = true
 					break
 				}
 				return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert event: %v", err)}
 			}
-			// Check if we broke out due to unique violation
-			if i < len(events)-1 {
-				continue // Will be caught by the next iteration
-			}
+		}
+		if insertConflict {
+			continue // Retry from scratch
 		}
 
 		// Verify all events were inserted by checking the last one
