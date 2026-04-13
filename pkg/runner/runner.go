@@ -198,14 +198,21 @@ func (r *Runner) Start(ctx context.Context) error {
 	eventCh := r.reader.IterEvents(ctx)
 	log.Printf("[runner:%s] started event loop", r.cfg.ReaderName)
 
+	inflight := NewInflightTracker()
 	for event := range eventCh {
+		inflight.Register(event.GlobalID)
+
 		parsedEvent, err := event.Event()
 		if err != nil {
 			log.Printf("[runner:%s] failed to parse event %d: %v", r.cfg.ReaderName, event.GlobalID, err)
+			inflight.MarkDone(event.GlobalID)
+			r.reader.SetCommittedOffset(inflight.CommittableOffset())
 			continue
 		}
 
 		if !r.cfg.IsMine(event.WorkflowID) {
+			inflight.MarkDone(event.GlobalID)
+			r.reader.SetCommittedOffset(inflight.CommittableOffset())
 			continue
 		}
 
@@ -213,6 +220,8 @@ func (r *Runner) Start(ctx context.Context) error {
 			log.Printf("[runner:%s] error processing event %d (workflow %s): %v",
 				r.cfg.ReaderName, event.GlobalID, event.WorkflowID, err)
 		}
+		inflight.MarkDone(event.GlobalID)
+		r.reader.SetCommittedOffset(inflight.CommittableOffset())
 	}
 
 	log.Printf("[runner:%s] shutting down", r.cfg.ReaderName)
