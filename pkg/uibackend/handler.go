@@ -877,7 +877,7 @@ func (h *handler) listActivities(w http.ResponseWriter, r *http.Request, f activ
 		}
 	}
 
-	var out []activityResponse
+	out := make([]activityResponse, 0)
 	for _, a := range activities {
 		cp := jsonObject(a.checkpoint)
 		em := eventMap[rowKey{a.wid, a.eventNumber}]
@@ -977,7 +977,7 @@ func (h *handler) listDelays(w http.ResponseWriter, r *http.Request, workflowTyp
 	}
 	defer rows.Close()
 
-	var out []delayResponse
+	out := make([]delayResponse, 0)
 	for rows.Next() {
 		var wid, wtype, did string
 		var until, created time.Time
