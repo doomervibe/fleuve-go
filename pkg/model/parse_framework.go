@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // ParseFrameworkEvent deserializes event types emitted by the framework into any
