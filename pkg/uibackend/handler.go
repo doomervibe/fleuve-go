@@ -552,6 +552,25 @@ func scanEventRow(row eventScanner) (eventResponse, error) {
 
 func (h *handler) getWorkflowStateAtVersion(w http.ResponseWriter, r *http.Request, workflowID string, version int64) {
 	ctx := r.Context()
+
+	// Try state replay first if a replayer is registered for this workflow type.
+	var wfType string
+	qtQ := fmt.Sprintf(`SELECT workflow_type FROM %s WHERE workflow_id = $1 LIMIT 1`, h.ev)
+	_ = h.pool.QueryRow(ctx, qtQ, workflowID).Scan(&wfType)
+	if wr, ok := h.replayByType[wfType]; ok {
+		st, _, err := h.replayWorkflowStateUpTo(ctx, workflowID, wfType, version, wr)
+		if err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"workflow_id": workflowID,
+				"version":     version,
+				"state":       st,
+			})
+			return
+		}
+		log.Printf("uibackend: replay state at version %q@%d: %s", sanitizeLogMessage(workflowID), version, sanitizeLogMessage(err.Error())) // #nosec G706
+	}
+
+	// Fallback: return raw events up to this version.
 	q := fmt.Sprintf(`
 		SELECT workflow_version, event_type, body, at FROM %s
 		WHERE workflow_id = $1 AND workflow_version <= $2
@@ -594,6 +613,33 @@ func (h *handler) getWorkflowStateAtVersion(w http.ResponseWriter, r *http.Reque
 
 func (h *handler) getWorkflowStateDiff(w http.ResponseWriter, r *http.Request, workflowID string, v1, v2 int64) {
 	ctx := r.Context()
+
+	// Try state replay first if a replayer is registered for this workflow type.
+	var wfType string
+	qtQ := fmt.Sprintf(`SELECT workflow_type FROM %s WHERE workflow_id = $1 LIMIT 1`, h.ev)
+	_ = h.pool.QueryRow(ctx, qtQ, workflowID).Scan(&wfType)
+	if wr, ok := h.replayByType[wfType]; ok {
+		st1, _, err1 := h.replayWorkflowStateUpTo(ctx, workflowID, wfType, v1, wr)
+		st2, _, err2 := h.replayWorkflowStateUpTo(ctx, workflowID, wfType, v2, wr)
+		if err1 == nil && err2 == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"workflow_id": workflowID,
+				"version1":    v1,
+				"version2":    v2,
+				"state_v1":    map[string]any{"version": v1, "state": st1},
+				"state_v2":    map[string]any{"version": v2, "state": st2},
+			})
+			return
+		}
+		if err1 != nil {
+			log.Printf("uibackend: state-diff replay %q@%d: %s", sanitizeLogMessage(workflowID), v1, sanitizeLogMessage(err1.Error())) // #nosec G706
+		}
+		if err2 != nil {
+			log.Printf("uibackend: state-diff replay %q@%d: %s", sanitizeLogMessage(workflowID), v2, sanitizeLogMessage(err2.Error())) // #nosec G706
+		}
+	}
+
+	// Fallback: return raw events at each version.
 	load := func(maxVer int64) ([]map[string]any, error) {
 		q := fmt.Sprintf(`
 			SELECT workflow_version, event_type, body, at FROM %s

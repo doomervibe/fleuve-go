@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 
 	"github.com/doomervibe/fleuve-go/pkg/model"
@@ -39,14 +40,42 @@ func stateToMap(s model.State) map[string]any {
 	return m
 }
 
+// compositeParser wraps a workflow-specific parser with a fallback to
+// model.ParseFrameworkEvent. This ensures framework events (subscription_added,
+// delay, delay_complete, etc.) never cause replay to fail just because the
+// workflow's own ParseEvent doesn't list them.
+func compositeParser(workflowParser model.EventParser) model.EventParser {
+	return func(eventType string, raw json.RawMessage) (model.Event, error) {
+		ev, err := workflowParser(eventType, raw)
+		if err == nil {
+			return ev, nil
+		}
+		fwEv, fwErr := model.ParseFrameworkEvent(eventType, raw)
+		if fwErr == nil {
+			return fwEv, nil
+		}
+		return nil, err // return the original workflow parser error
+	}
+}
+
 // replayWorkflowState loads all events for workflowID and folds them through
 // model.ReplayRawEvents. wfType must match the row's workflow_type.
 func (h *handler) replayWorkflowState(ctx context.Context, workflowID, wfType string, wr WorkflowReplay) (map[string]any, int64, error) {
+	return h.replayWorkflowStateUpTo(ctx, workflowID, wfType, 0, wr)
+}
+
+// replayWorkflowStateUpTo is like replayWorkflowState but only replays events
+// up to and including maxVersion. Pass 0 to replay all events.
+func (h *handler) replayWorkflowStateUpTo(ctx context.Context, workflowID, wfType string, maxVersion int64, wr WorkflowReplay) (map[string]any, int64, error) {
+	cap := int64(math.MaxInt64)
+	if maxVersion > 0 {
+		cap = maxVersion
+	}
 	q := fmt.Sprintf(`
 		SELECT workflow_version, event_type, COALESCE(schema_version, 1), body
-		FROM %s WHERE workflow_id = $1 AND workflow_type = $2
+		FROM %s WHERE workflow_id = $1 AND workflow_type = $2 AND workflow_version <= $3
 		ORDER BY workflow_version ASC`, h.ev)
-	rows, err := h.pool.Query(ctx, q, workflowID, wfType)
+	rows, err := h.pool.Query(ctx, q, workflowID, wfType, cap)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -79,7 +108,7 @@ func (h *handler) replayWorkflowState(ctx context.Context, workflowID, wfType st
 
 	cfg := model.ReplayConfig{
 		Workflow:             wr.Workflow,
-		Parser:               wr.Parser,
+		Parser:               compositeParser(wr.Parser),
 		CurrentSchemaVersion: wr.Workflow.SchemaVersion(),
 	}
 	state, err := model.ReplayRawEvents(cfg, nil, raws)
