@@ -20,6 +20,11 @@ type SyncDBHandler func(ctx context.Context, tx pgx.Tx, workflowID string, oldSt
 // EventParser deserializes raw JSON into an Event based on event type.
 type EventParser func(eventType string, raw json.RawMessage) (model.Event, error)
 
+// StateParser deserializes a snapshot JSON blob into the concrete State type.
+// If nil, the repo falls back to *model.StateBase (which will panic on type assertion
+// in concrete Evolve methods).
+type StateParser func(raw json.RawMessage) (model.State, error)
+
 // Repo is the pgx-backed workflow repository implementing event sourcing.
 // It provides transactional command processing with the Outbox pattern.
 type Repo struct {
@@ -28,6 +33,7 @@ type Repo struct {
 	workflow           model.Workflow
 	es                 EphemeralStorage
 	eventParser        EventParser
+	stateParser        StateParser
 	syncDBHandler      SyncDBHandler
 	snapshotInterval   int
 	snapshotTable      string
@@ -78,6 +84,12 @@ func WithTrustCache(trust bool) RepoOption {
 // WithEventParser sets the event deserialization function.
 func WithEventParser(parser EventParser) RepoOption {
 	return func(r *Repo) { r.eventParser = parser }
+}
+
+// WithStateParser sets the snapshot state deserialization function.
+// Required when snapshotting is enabled to restore the concrete State type.
+func WithStateParser(parser StateParser) RepoOption {
+	return func(r *Repo) { r.stateParser = parser }
 }
 
 // WithSubscriptionsTable sets the subscriptions table name.
@@ -1113,11 +1125,12 @@ func (r *Repo) loadWorkflowTagsTx(ctx context.Context, tx pgx.Tx, id string) ([]
 	return tags, err
 }
 
-// parseState deserializes JSON into a State.
-// This is a placeholder - concrete implementations should provide proper parsing.
+// parseState deserializes a snapshot JSON blob into a State.
+// Uses the configured StateParser if available, otherwise falls back to StateBase.
 func (r *Repo) parseState(data json.RawMessage) (model.State, error) {
-	// The concrete workflow should provide a state parser
-	// For now, return a basic StateBase
+	if r.stateParser != nil {
+		return r.stateParser(data)
+	}
 	var state model.StateBase
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
