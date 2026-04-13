@@ -164,141 +164,146 @@ func (r *Repo) ProcessCommand(ctx context.Context, id string, cmd model.Command)
 	const maxRetries = 100
 
 	for retry := 0; retry < maxRetries; retry++ {
-		tx, err := r.pool.Begin(ctx)
-		if err != nil {
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}
+		ss, events, rej, shouldRetry := r.processCommandAttempt(ctx, id, cmd)
+		if !shouldRetry {
+			return ss, events, rej
 		}
-		defer func() { _ = tx.Rollback(ctx) }()
-
-		// Step 1: Acquire row-level lock on version=1 event
-		var lockKey int64
-		err = tx.QueryRow(ctx,
-			fmt.Sprintf("SELECT global_id FROM %s WHERE workflow_id = $1 AND workflow_version = 1 FOR UPDATE", r.eventsTable),
-			id,
-		).Scan(&lockKey)
-		if err == pgx.ErrNoRows {
-			return nil, nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
-		}
-		if err != nil {
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to acquire lock: %v", err)}
-		}
-
-		// Step 2: Load current state
-		state, err := r.getCurrentStateTx(ctx, tx, id, false)
-		if err != nil {
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}
-		}
-		if state == nil || state.State == nil {
-			return nil, nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}
-		}
-
-		// Step 3: Lifecycle check
-		lifecycle := state.State.GetLifecycle()
-		if lifecycle == model.LifecyclePaused {
-			return nil, nil, &model.Rejection{Msg: (&model.WorkflowPaused{}).Error()}
-		}
-		if lifecycle == model.LifecycleCanceled {
-			return nil, nil, &model.Rejection{Msg: (&model.WorkflowCanceled{}).Error()}
-		}
-
-		// Step 4: Call decide()
-		events, rejection := r.workflow.Decide(state.State, cmd)
-		if rejection != nil {
-			return nil, nil, rejection
-		}
-		if len(events) == 0 {
-			// No-op - return current state unchanged
-			return state, nil, nil
-		}
-
-		// Step 5: Evolve to compute new state
-		newState := model.EvolveAll(r.workflow, state.State, events)
-		newVersion := state.Version + int64(len(events))
-
-		// Step 6: Handle sync events BEFORE inserting events
-		if err := r.handleSyncEventsTx(ctx, tx, id, state.Version, events); err != nil {
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to handle sync events: %v", err)}
-		}
-
-		// Step 7: Call sync_db handler if configured
-		if r.syncDBHandler != nil {
-			if err := r.syncDBHandler(ctx, tx, id, state.State, newState, events); err != nil {
-				return nil, nil, &model.Rejection{Msg: fmt.Sprintf("sync_db handler failed: %v", err)}
-			}
-		}
-
-		// Step 8: Inject workflow tags into event metadata
-		wfTags, _ := r.loadWorkflowTagsTx(ctx, tx, id)
-		for _, e := range events {
-			model.SetWorkflowTagsInMetadata(e, wfTags)
-		}
-
-		// Step 9: INSERT all events
-		insertConflict := false
-		for i, e := range events {
-			eventVersion := state.Version + int64(i) + 1
-			if err := r.insertEventTx(ctx, tx, id, eventVersion, e); err != nil {
-				if isUniqueViolation(err) {
-					// Concurrent command - retry with a fresh transaction
-					insertConflict = true
-					break
-				}
-				return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert event: %v", err)}
-			}
-		}
-		if insertConflict {
-			continue // Retry from scratch
-		}
-
-		// Verify all events were inserted by checking the last one
-		var lastInsertedVersion int64
-		err = tx.QueryRow(ctx,
-			fmt.Sprintf("SELECT workflow_version FROM %s WHERE workflow_id = $1 ORDER BY workflow_version DESC LIMIT 1", r.eventsTable),
-			id,
-		).Scan(&lastInsertedVersion)
-		if err != nil {
-			if isUniqueViolation(err) || err == pgx.ErrNoRows {
-				continue // Retry
-			}
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to verify insert: %v", err)}
-		}
-		if lastInsertedVersion < newVersion {
-			continue // Some events weren't inserted - retry
-		}
-
-		// Step 9.5: Record global_id for horizon subscriptions to prevent double-delivery
-		if err := r.updateSubscriptionAddedGlobalIDsTx(ctx, tx, id, state.Version, events); err != nil {
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to update subscription global IDs: %v", err)}
-		}
-
-		// Step 10: Maybe snapshot
-		if err := r.maybeSnapshotTx(ctx, tx, id, newState, newVersion); err != nil {
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to snapshot: %v", err)}
-		}
-
-		// Commit
-		if err := tx.Commit(ctx); err != nil {
-			if isUniqueViolation(err) {
-				continue // Retry
-			}
-			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to commit: %v", err)}
-		}
-
-		// Step 11: Update ephemeral cache
-		newSS := &model.StoredState{ID: id, Version: newVersion, State: newState}
-
-		// Check if final event (but NOT EvSystemCancel)
-		lastEvent := events[len(events)-1]
-		if model.IsTerminalState(r.workflow, lastEvent) {
-			_ = r.es.RemoveState(ctx, id)
-		} else {
-			_ = r.es.PutState(ctx, newSS)
-		}
-
-		return newSS, events, nil
 	}
 
 	return nil, nil, &model.Rejection{Msg: "max retries exceeded for concurrent command processing"}
+}
+
+// processCommandAttempt executes a single attempt at processing a command within
+// one transaction. Returns shouldRetry=true when a concurrent write conflict is
+// detected (unique violation on INSERT or at commit time) so the caller can retry.
+func (r *Repo) processCommandAttempt(ctx context.Context, id string, cmd model.Command) (*model.StoredState, []model.Event, *model.Rejection, bool) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to begin transaction: %v", err)}, false
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Step 1: Acquire row-level lock on version=1 event
+	var lockKey int64
+	err = tx.QueryRow(ctx,
+		fmt.Sprintf("SELECT global_id FROM %s WHERE workflow_id = $1 AND workflow_version = 1 FOR UPDATE", r.eventsTable),
+		id,
+	).Scan(&lockKey)
+	if err == pgx.ErrNoRows {
+		return nil, nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}, false
+	}
+	if err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to acquire lock: %v", err)}, false
+	}
+
+	// Step 2: Load current state
+	state, err := r.getCurrentStateTx(ctx, tx, id, false)
+	if err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to load state: %v", err)}, false
+	}
+	if state == nil || state.State == nil {
+		return nil, nil, &model.Rejection{Msg: (&model.WorkflowNotFound{ID: id, WorkflowType: r.workflowType}).Error()}, false
+	}
+
+	// Step 3: Lifecycle check
+	lifecycle := state.State.GetLifecycle()
+	if lifecycle == model.LifecyclePaused {
+		return nil, nil, &model.Rejection{Msg: (&model.WorkflowPaused{}).Error()}, false
+	}
+	if lifecycle == model.LifecycleCanceled {
+		return nil, nil, &model.Rejection{Msg: (&model.WorkflowCanceled{}).Error()}, false
+	}
+
+	// Step 4: Call decide()
+	events, rejection := r.workflow.Decide(state.State, cmd)
+	if rejection != nil {
+		return nil, nil, rejection, false
+	}
+	if len(events) == 0 {
+		// No-op - return current state unchanged
+		return state, nil, nil, false
+	}
+
+	// Step 5: Evolve to compute new state
+	newState := model.EvolveAll(r.workflow, state.State, events)
+	newVersion := state.Version + int64(len(events))
+
+	// Step 6: Handle sync events BEFORE inserting events
+	if err := r.handleSyncEventsTx(ctx, tx, id, state.Version, events); err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to handle sync events: %v", err)}, false
+	}
+
+	// Step 7: Call sync_db handler if configured
+	if r.syncDBHandler != nil {
+		if err := r.syncDBHandler(ctx, tx, id, state.State, newState, events); err != nil {
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("sync_db handler failed: %v", err)}, false
+		}
+	}
+
+	// Step 8: Inject workflow tags into event metadata
+	wfTags, _ := r.loadWorkflowTagsTx(ctx, tx, id)
+	for _, e := range events {
+		model.SetWorkflowTagsInMetadata(e, wfTags)
+	}
+
+	// Step 9: INSERT all events
+	for i, e := range events {
+		eventVersion := state.Version + int64(i) + 1
+		if err := r.insertEventTx(ctx, tx, id, eventVersion, e); err != nil {
+			if isUniqueViolation(err) {
+				// Concurrent command - retry with a fresh transaction
+				return nil, nil, nil, true
+			}
+			return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to insert event: %v", err)}, false
+		}
+	}
+
+	// Verify all events were inserted by checking the last one
+	var lastInsertedVersion int64
+	err = tx.QueryRow(ctx,
+		fmt.Sprintf("SELECT workflow_version FROM %s WHERE workflow_id = $1 ORDER BY workflow_version DESC LIMIT 1", r.eventsTable),
+		id,
+	).Scan(&lastInsertedVersion)
+	if err != nil {
+		if isUniqueViolation(err) || err == pgx.ErrNoRows {
+			return nil, nil, nil, true // Retry
+		}
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to verify insert: %v", err)}, false
+	}
+	if lastInsertedVersion < newVersion {
+		return nil, nil, nil, true // Some events weren't inserted - retry
+	}
+
+	// Step 9.5: Record global_id for horizon subscriptions to prevent double-delivery
+	if err := r.updateSubscriptionAddedGlobalIDsTx(ctx, tx, id, state.Version, events); err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to update subscription global IDs: %v", err)}, false
+	}
+
+	// Step 10: Maybe snapshot
+	if err := r.maybeSnapshotTx(ctx, tx, id, newState, newVersion); err != nil {
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to snapshot: %v", err)}, false
+	}
+
+	// Commit
+	if err := tx.Commit(ctx); err != nil {
+		if isUniqueViolation(err) {
+			return nil, nil, nil, true // Retry
+		}
+		return nil, nil, &model.Rejection{Msg: fmt.Sprintf("failed to commit: %v", err)}, false
+	}
+
+	// Step 11: Update ephemeral cache
+	newSS := &model.StoredState{ID: id, Version: newVersion, State: newState}
+
+	// Check if final event (but NOT EvSystemCancel)
+	lastEvent := events[len(events)-1]
+	if model.IsTerminalState(r.workflow, lastEvent) {
+		_ = r.es.RemoveState(ctx, id)
+	} else {
+		_ = r.es.PutState(ctx, newSS)
+	}
+
+	return newSS, events, nil, false
 }
 
 // CreateNew creates a new workflow with the given ID and initial command.
